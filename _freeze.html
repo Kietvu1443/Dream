@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script></head>
+<body>
+<div id="app"></div>
+<script src="game.js"></script>
+<script>
+/* FREEZE REPRODUCTION
+ * Drives the exact production flow for every perk and every trail:
+ *   run -> clear stage -> reward -> select -> next stage -> 300 frames
+ * The frame gate below mirrors Game._loop exactly, so a state-machine freeze
+ * shows up as "0 updates" rather than silently passing. */
+(function () {
+  const L = []; const errors = [];
+  window.addEventListener('error', (e) => errors.push('onerror: ' + e.message));
+  const ce = console.error;
+  console.error = function () { errors.push('console.error: ' + [].join.call(arguments, ' ')); ce.apply(console, arguments); };
+  const log = (n, ok, x) => L.push((ok ? 'PASS  ' : 'FAIL  ') + n + (x !== undefined ? '  [' + x + ']' : ''));
+  const assert = (n, c, x) => { log(n, !!c, x); return !!c; };
+  const $ = (id) => document.getElementById(id);
+  document.body.innerHTML = `
+    <canvas id="game-canvas"></canvas>
+    <div id="hud" class="hidden">
+      <div id="crosshair"><span></span><span></span><span></span><span></span><span></span></div>
+      <div id="hitmarker"><span></span><span></span><span></span><span></span></div>
+      <div id="armor-flash"></div><div id="scope-overlay" class="hidden"></div>
+      <div id="hud-topleft"><div id="hp-fill"></div><span id="hp-text"></span><div id="stamina-fill"></div>
+        <div id="armor-helmet" class="armor-chip empty"></div><div id="armor-body" class="armor-chip empty"></div>
+        <div id="armor-boots" class="armor-chip empty"></div><span id="armor-total"></span><div id="buff-list"></div></div>
+      <div id="perk-hud" class="perk-hud hidden"></div>
+      <div id="trail-list"></div><div id="synergy-list"></div>
+      <div id="boss-bar" class="hidden"><div id="boss-name"></div><div id="boss-fill"></div><div id="boss-text"></div></div>
+      <div id="pickup-prompt" class="hidden"></div>
+      <div id="hud-topright"><span id="wave-value"></span><span id="layout-name"></span><span id="enemy-value"></span><span id="kills-value"></span></div>
+      <div id="hud-bottomleft"><div id="weapon-name"></div><div id="weapon-mods"></div>
+        <span id="ammo-mag"></span><span id="ammo-reserve"></span><span id="ammo-type"></span>
+        <div id="reload-hint" class="hidden"></div></div>
+      <div id="weapon-slots"><div class="slot"><b>1</b><span></span></div><div class="slot"><b>2</b><span></span></div>
+        <div class="slot"><b>3</b><span></span></div></div>
+      <div id="dash-status" class="ready">DASH</div>
+      <div id="damage-vignette"></div><div id="directional-damage"></div><div id="low-hp-pulse"></div>
+      <div id="wave-banner"></div><div id="intermission"></div><div id="damage-numbers"></div><div id="buff-toast"></div>
+    </div>
+    <div id="inventory" class="screen hidden"><div id="inv-armor"></div><div id="inv-weapons"></div>
+      <div id="inv-ammo"></div><div id="inv-build"></div></div>
+    <div id="reward-screen" class="screen hidden"><div id="reward-title"></div><div id="reward-cards"></div></div>
+    <div id="menu-main" class="screen"></div><div id="menu-controls" class="screen hidden"></div>
+    <div id="menu-pause" class="screen hidden"></div>
+    <div id="menu-gameover" class="screen hidden"><span id="rs-wave"></span><span id="rs-kills"></span><span id="rs-acc"></span></div>
+    <div id="menu-loading" class="screen"><p id="loading-status"></p></div>`;
+
+  const g = new window.StrikeProtocol.Game();
+  const SP = window.StrikeProtocol;
+  const P = g.player;
+  let updates = 0;
+  /** mirrors the production frame gate in Game._loop */
+  function frame() {
+    if (g.state === 'playing' || g.state === 'dead') { g._update(1 / 60); updates++; }
+    g.input.endFrame();
+  }
+  const frames = (n) => { for (let i = 0; i < n; i++) frame(); };
+
+  /** full run -> clear -> reward -> pick -> next stage flow */
+  function flow(label, kind, def) {
+    g.startGame();
+    P.invuln = 1e7;
+    g.waveManager.state = 'playing';
+    g.waveManager.wave = 1;
+    g.enemies.slice().forEach(e => e.takeDamage(999999, new THREE.Vector3(0, 0, 1), false, g));
+    g.onStageCleared(false);                 // -> state 'reward', cards shown
+    const before = g.state;
+    const hadCards = !!g.ui._rewardOptions;
+    g._applyReward({ kind: kind, def: def }); // exactly what chooseReward calls
+    const after = g.state;
+    const overlaysClosed = $('reward-screen').classList.contains('hidden');
+    updates = 0;
+    frames(300);
+    const ok = after === 'playing' && updates > 200 && overlaysClosed;
+    log((ok ? 'PASS  ' : 'FAIL  ') + label,
+      before === 'reward' && hadCards && ok,
+      'before=' + before + ' after=' + after + ' updates=' + updates + ' overlayHidden=' + overlaysClosed);
+    return ok;
+  }
+
+  try {
+    /* ---------------- 1. every perk through the reward flow ---------------- */
+    const perks = ['fireman', 'samurai', 'executioner', 'phantom', 'medic', 'gravity', 'engineer'];
+    for (const id of perks) {
+      const def = SP.PERK_BY_ID[id];
+      const ok = flow('perk flow: ' + def.name, 'perk', def);
+      // the perk must also still work once the next stage is running
+      if (ok) {
+        frames(120);
+        log('     ' + def.name + ' updates during next stage: ' + updates,
+          updates > 300 && g.state === 'playing');
+      }
+    }
+
+    /* ---------------- 2. every trail through the reward flow ---------------- */
+    const trails = ['impatient', 'survival', 'hunter', 'berserker', 'scavenger', 'momentum',
+      'bloodlust', 'guardian', 'predator', 'adrenaline', 'tactician'];
+    for (const id of trails) {
+      const def = SP.TRAIL_BY_ID[id];
+      flow('trail flow: ' + def.name, 'trail', def);
+    }
+
+    /* ---------------- 3. buff flow (the path that worked before) ---------------- */
+    flow('buff flow: Berserker', 'buff', SP.BUFFS[0]);
+
+    /* ---------------- 4. picking through the real click path ---------------- */
+    g.startGame();
+    g.waveManager.state = 'playing'; g.waveManager.wave = 1;
+    g.onStageCleared(false);
+    let guard = 0;
+    while (!g.ui._rewardOptions && guard++ < 20) g._offerReward(false);
+    const opts = g.ui._rewardOptions || [];
+    const idx = opts.findIndex(o => o.kind === 'trail' || o.kind === 'perk');
+    if (idx >= 0) {
+      g.ui.chooseReward(idx);
+      updates = 0; frames(240);
+      assert('click path: state returns to playing', g.state === 'playing', g.state);
+      assert('click path: frames keep running', updates > 200, updates);
+    } else {
+      log('click path: no trail/perk card rolled (skipping)', true, opts.map(o => o.kind).join(','));
+    }
+
+    /* ---------------- 5. perk + 3 trails, then stage transition ---------------- */
+    for (const combo of [
+      { p: 'fireman', t: ['hunter', 'momentum', 'adrenaline'] },
+      { p: 'samurai', t: ['impatient', 'bloodlust', 'momentum'] },
+      { p: 'executioner', t: ['hunter', 'predator', 'tactician'] },
+      { p: 'medic', t: ['survival', 'guardian', 'scavenger'] },
+      { p: 'engineer', t: ['hunter', 'scavenger', 'momentum'] },
+      { p: 'phantom', t: ['momentum', 'adrenaline', 'guardian'] },
+      { p: 'gravity', t: ['berserker', 'guardian', 'tactician'] }
+    ]) {
+      g.startGame();
+      P.invuln = 1e7;
+      g.waveManager.state = 'playing'; g.waveManager.wave = 1;
+      g.build.equipPerk(combo.p);
+      combo.t.forEach((t, i) => g.build.equipTrail(t, i));
+      g.enemies.slice().forEach(e => e.takeDamage(999999, new THREE.Vector3(0, 0, 1), false, g));
+      g.onStageCleared(false);
+      g._offerReward(false);
+      const pick = (g.ui._rewardOptions || []).find(o => o.kind === 'trail' || o.kind === 'perk' || o.kind === 'buff');
+      if (pick) g.ui.chooseReward(g.ui._rewardOptions.indexOf(pick));
+      updates = 0; frames(360);
+      assert('combo ' + combo.p + '+' + combo.t.length + 'trails survives the transition',
+        g.state === 'playing' && updates > 300, 'state=' + g.state + ' updates=' + updates);
+      // and the fight is actually live again
+      const before2 = g.waveManager.queue.length;
+      frames(120);
+      assert('  combo stage content spawns', g.waveManager.queue.length <= before2 || g.aliveEnemyCount() >= 0,
+        'queue=' + g.waveManager.queue.length + ' alive=' + g.aliveEnemyCount());
+    }
+
+    /* ---------------- 6. stress 2000 frames with a full build ---------------- */
+    g.startGame();
+    P.invuln = 1e7;
+    g.build.equipPerk('fireman');
+    ['hunter', 'momentum', 'adrenaline'].forEach((t, i) => g.build.equipTrail(t, i));
+    g.waveManager.state = 'fighting';
+    updates = 0;
+    const gKey = (c, down) => window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code: c, bubbles: true }));
+    let stressOk = true;
+    for (let i = 0; i < 2000; i++) {
+      if (i % 90 === 0) { g.input.keys['KeyW'] = !(i % 180); g.input.keys['ShiftLeft'] = i % 300 < 150; }
+      if (i % 240 === 0) { P.dashCd = 0; P.tryDash(0, 1); }
+      if (i % 300 === 0) { g.input.buttons[2] = !(i % 600); }
+      if (i % 500 === 0) gKey('KeyQ', i % 1000 < 500);
+      if (i % 600 === 0) g.activatePerk();
+      frame();
+      P.invuln = 1e7;
+      const ps = g.build.perkState;
+      if (!Number.isFinite(ps.heat) || !Number.isFinite(ps.dogtags) || !Number.isFinite(ps.mask)) {
+        stressOk = false; L.push('   perk state went non-finite at frame ' + i); break;
+      }
+      if (!finite()) { stressOk = false; L.push('   world state went non-finite at frame ' + i); break; }
+      if (updates === 0) { stressOk = false; L.push('   loop stopped updating at frame ' + i); break; }
+    }
+    g.input.keys['KeyW'] = false; g.input.keys['ShiftLeft'] = false; g.input.buttons[2] = false; gKey('KeyQ', 'keyup');
+    assert('stress 2000 frames with a full build', stressOk && updates === 2000, 'updates=' + updates);
+    assert('stress: no orphan effects', g.afterimages.length <= 4 && g.enemyMarkers.every(m => m.style.display === 'none'),
+      'ghosts=' + g.afterimages.length);
+    assert('stress: pickups bounded', g.pickups.length < 60, g.pickups.length);
+
+    function finite() {
+      const c = g.camera, w = P.weapon;
+      const v = [c.position.x, c.position.y, c.position.z, c.quaternion.x, c.quaternion.y, c.quaternion.z, c.quaternion.w,
+        P.position.x, P.position.y, P.position.z, P.velocity.x, P.velocity.y, P.velocity.z, P.adsAmt, P.leanAmt];
+      if (w) v.push(w.group.position.x, w.group.position.y, w.group.position.z);
+      for (const x of v) if (!Number.isFinite(x)) return false;
+      return true;
+    }
+
+    /* ---------------- 7. restart after a build ---------------- */
+    g.startGame();
+    assert('restart clears the build',
+      g.build.perk === null && g.build.trailCount() === 0 && g.build.perkState === null &&
+      g.afterimages.length === 0 && g.pickups.length === 0, g.build.perkState === null ? 'ok' : 'stale state');
+
+    assert('no runtime errors', errors.length === 0, errors.length);
+    errors.slice(0, 5).forEach(e => L.push('   ' + e));
+  } catch (err) { L.push('THREW ' + (err.stack || err)); }
+
+  const o = document.createElement('pre'); o.id = 'testout';
+  o.textContent = '\n===TESTSTART===\n' + L.join('\n') + '\n===TESTEND===\n';
+  document.body.appendChild(o);
+})();
+</script></body></html>

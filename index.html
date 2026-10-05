@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>STRIKE PROTOCOL — 3D FPS</title>
+<link rel="stylesheet" href="style.css" />
+<!-- Three.js UMD build: works from file:// as well as from any local web server -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <canvas id="game-canvas"></canvas>
+
+  <!-- ============ HUD ============ -->
+  <div id="hud" class="hidden">
+    <div id="crosshair">
+      <span class="ch-line ch-t"></span>
+      <span class="ch-line ch-r"></span>
+      <span class="ch-line ch-b"></span>
+      <span class="ch-line ch-l"></span>
+      <span class="ch-dot"></span>
+    </div>
+    <div id="hitmarker"><span></span><span></span><span></span><span></span></div>
+    <div id="armor-flash"></div>
+    <div id="scope-overlay" class="hidden"></div>
+
+    <div id="hud-topleft">
+      <div class="hud-block">
+        <div class="hud-label">HEALTH</div>
+        <div class="bar hp-bar"><div id="hp-fill" class="bar-fill"></div><span id="hp-text">100 / 100</span></div>
+      </div>
+      <div class="hud-block">
+        <div class="hud-label">STAMINA</div>
+        <div class="bar st-bar"><div id="stamina-fill" class="bar-fill"></div></div>
+      </div>
+      <div class="armor-row">
+        <div id="armor-helmet" class="armor-chip empty"><i>H</i><b>--</b></div>
+        <div id="armor-body" class="armor-chip empty"><i>B</i><b>--</b></div>
+        <div id="armor-boots" class="armor-chip empty"><i>F</i><b>--</b></div>
+        <span id="armor-total"></span>
+      </div>
+      <div id="buff-list" class="buff-list"></div>
+    </div>
+
+    <div id="perk-hud" class="perk-hud hidden"></div>
+    <div id="trail-list" class="trail-list"></div>
+    <div id="synergy-list" class="synergy-list"></div>
+
+    <div id="boss-bar" class="hidden">
+      <div id="boss-name">STAGE TITAN</div>
+      <div class="boss-track"><div id="boss-fill"></div></div>
+      <div id="boss-text">0 / 0</div>
+    </div>
+
+    <div id="pickup-prompt" class="hidden"></div>
+
+    <div id="hud-topright">
+      <div class="hud-stat"><span class="hs-key">STAGE</span><span id="wave-value" class="hs-val">1</span></div>
+      <div id="layout-name" class="layout-name"></div>
+      <div class="hud-stat"><span class="hs-key">HOSTILES</span><span id="enemy-value" class="hs-val">0</span></div>
+      <div class="hud-stat"><span class="hs-key">KILLS</span><span id="kills-value" class="hs-val">0</span></div>
+    </div>
+
+    <div id="hud-bottomleft">
+      <div id="weapon-name">ASSAULT RIFLE</div>
+      <div id="weapon-mods" class="mod-list"></div>
+      <div id="ammo-line">
+        <span id="ammo-mag">30</span><span class="ammo-sep">/</span><span id="ammo-reserve">240</span>
+        <span id="ammo-type" class="ammo-type">5.56</span>
+      </div>
+      <div id="reload-hint" class="hidden">RELOADING…</div>
+    </div>
+
+    <div id="dash-status" class="ready">DASH <b>READY</b></div>
+
+    <div id="weapon-slots">
+      <div class="slot active" data-slot="1"><b>1</b><span>ASSAULT RIFLE</span></div>
+      <div class="slot" data-slot="2"><b>2</b><span>SHOTGUN</span></div>
+      <div class="slot" data-slot="3"><b>3</b><span>EMPTY</span></div>
+    </div>
+
+    <div id="damage-vignette"></div>
+    <div id="directional-damage"></div>
+    <div id="low-hp-pulse"></div>
+    <div id="wave-banner"></div>
+    <div id="intermission"></div>
+    <div id="damage-numbers"></div>
+    <div id="buff-toast"></div>
+  </div>
+
+  <!-- ============ INVENTORY (TAB) ============ -->
+  <div id="inventory" class="screen hidden">
+    <div class="screen-inner inv-inner">
+      <h2 class="menu-title">INVENTORY</h2>
+      <div class="inv-grid">
+        <div class="inv-col">
+          <h3 class="inv-head">ARMOR</h3>
+          <div id="inv-armor"></div>
+          <h3 class="inv-head">AMMO</h3>
+          <div id="inv-ammo" class="inv-ammo-grid"></div>
+        </div>
+        <div class="inv-col">
+          <h3 class="inv-head">WEAPONS</h3>
+          <div id="inv-weapons"></div>
+          <div id="inv-build"></div>
+        </div>
+      </div>
+      <p class="hint">TAB để đóng · Q/E lean · RMB ngắm · CTRL dash</p>
+    </div>
+  </div>
+
+  <!-- ============ REWARD (buff pick) ============ -->
+  <div id="reward-screen" class="screen hidden">
+    <div class="screen-inner reward-inner">
+      <h2 id="reward-title" class="menu-title">STAGE CLEARED</h2>
+      <p class="reward-sub">CHOOSE 1 BUFF &mdash; PRESS <b>1</b> / <b>2</b> / <b>3</b> OR CLICK</p>
+      <div id="reward-cards" class="reward-cards"></div>
+    </div>
+  </div>
+
+  <!-- ============ MAIN MENU ============ -->
+  <div id="menu-main" class="screen">
+    <div class="screen-inner">
+      <h1 class="game-title">STRIKE<span>PROTOCOL</span></h1>
+      <p class="game-sub">3D FIRST-PERSON SHOOTER — ROGUELITE STAGE SURVIVAL</p>
+      <div class="menu-buttons">
+        <button id="btn-start" class="btn btn-primary">START GAME</button>
+        <button id="btn-controls" class="btn">CONTROLS</button>
+      </div>
+      <p class="hint">Click vào game để khoá con trỏ chuột. Nhấn ESC để tạm dừng.</p>
+    </div>
+  </div>
+
+  <!-- ============ CONTROLS ============ -->
+  <div id="menu-controls" class="screen hidden">
+    <div class="screen-inner">
+      <h2 class="menu-title">CONTROLS</h2>
+      <table class="controls-table">
+        <tr><td>W A S D</td><td>Di chuyển</td></tr>
+        <tr><td>MOUSE</td><td>Nhìn</td></tr>
+        <tr><td>SHIFT</td><td>Chạy (dùng stamina)</td></tr>
+        <tr><td>SPACE</td><td>Nhảy</td></tr>
+        <tr><td>LEFT CLICK</td><td>Bắn</td></tr>
+        <tr><td>R</td><td>Reload</td></tr>
+        <tr><td>1 / 2 / 3</td><td>Đổi súng (3 slot)</td></tr>
+        <tr><td>E</td><td>Nhặt súng / vũ khí trên mặt đất</td></tr>
+        <tr><td>G</td><td>Vứt súng đang cầm</td></tr>
+        <tr><td>Q / E</td><td>Lean trái / phải</td></tr>
+        <tr><td>CTRL</td><td>Dash</td></tr>
+        <tr><td>RMB</td><td>Aim (ADS)</td></tr>
+        <tr><td>F</td><td>Perk (nếu đã trang bị)</td></tr>
+        <tr><td>TAB</td><td>Mở build / inventory</td></tr>
+        <tr><td>ESC</td><td>Pause / Resume</td></tr>
+      </table>
+      <div class="menu-buttons">
+        <button id="btn-controls-back" class="btn">BACK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ PAUSE ============ -->
+  <div id="menu-pause" class="screen hidden">
+    <div class="screen-inner">
+      <h2 class="menu-title">PAUSED</h2>
+      <div class="menu-buttons">
+        <button id="btn-resume" class="btn btn-primary">RESUME</button>
+        <button id="btn-pause-controls" class="btn">CONTROLS</button>
+        <button id="btn-quit" class="btn btn-danger">QUIT TO MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ GAME OVER ============ -->
+  <div id="menu-gameover" class="screen hidden">
+    <div class="screen-inner">
+      <h2 class="menu-title danger">YOU DIED</h2>
+      <div class="result-grid">
+        <div><span class="rs-key">STAGE REACHED</span><span class="rs-val" id="rs-wave">1</span></div>
+        <div><span class="rs-key">KILLS</span><span class="rs-val" id="rs-kills">0</span></div>
+        <div><span class="rs-key">ACCURACY</span><span class="rs-val" id="rs-acc">0%</span></div>
+      </div>
+      <div class="menu-buttons">
+        <button id="btn-restart" class="btn btn-primary">RESTART</button>
+        <button id="btn-gameover-menu" class="btn">MAIN MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ LOADING ============ -->
+  <div id="menu-loading" class="screen">
+    <div class="screen-inner">
+      <h2 class="menu-title">LOADING ENGINE…</h2>
+      <p class="hint" id="loading-status">Fetching Three.js…</p>
+    </div>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>
