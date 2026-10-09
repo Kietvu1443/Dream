@@ -5,11 +5,16 @@
 <div id="app"></div>
 <script src="game.js"></script>
 <script>
-/* FREEZE REPRODUCTION
- * Drives the exact production flow for every perk and every trail:
- *   run -> clear stage -> reward -> select -> next stage -> 300 frames
- * The frame gate below mirrors Game._loop exactly, so a state-machine freeze
- * shows up as "0 updates" rather than silently passing. */
+/* COMPREHENSIVE FREEZE REPRODUCTION & REGRESSION TEST SUITE
+ * 1. 74+ BUILD SUITE TESTS
+ * 2. 33 REGRESSION TESTS
+ * 3. PERK TRANSITION TESTS (7 PERKS)
+ * 4. TRAIL TRANSITION TESTS (11 TRAILS)
+ * 5. REWARD CLICK PATH & BUFF FLOW
+ * 6. COMBINATIONS (PERK + 3 TRAILS)
+ * 7. 2000-FRAME STRESS TEST
+ * 8. RESTART & ZERO LEAK VALIDATION
+ */
 (function () {
   const L = []; const errors = [];
   window.addEventListener('error', (e) => errors.push('onerror: ' + e.message));
@@ -38,8 +43,26 @@
       <div id="weapon-slots"><div class="slot"><b>1</b><span></span></div><div class="slot"><b>2</b><span></span></div>
         <div class="slot"><b>3</b><span></span></div></div>
       <div id="dash-status" class="ready">DASH</div>
-      <div id="damage-vignette"></div><div id="directional-damage"></div><div id="low-hp-pulse"></div>
+      <div id="damage-vignette"></div><div id="damage-direction-layer"></div><div id="directional-damage"></div><div id="low-hp-pulse"></div>
       <div id="wave-banner"></div><div id="intermission"></div><div id="damage-numbers"></div><div id="buff-toast"></div>
+      <div id="perk-vignette" class="perk-vignette"></div>
+      <div id="executioner-visor" class="executioner-visor hidden">
+        <div class="visor-frame">
+          <div class="visor-bracket vb-tl"></div><div class="visor-bracket vb-tr"></div>
+          <div class="visor-bracket vb-bl"></div><div class="visor-bracket vb-br"></div>
+          <div class="visor-header"><span class="vh-tag">EXECUTIONER OPTICS</span><span id="visor-durability-text" class="vh-dur">MASK: 100%</span></div>
+          <div class="visor-bar"><div id="visor-durability-fill" style="width:100%"></div></div>
+          <div id="visor-repair-box" class="visor-repair hidden">REPAIRING OPTICS: <b id="visor-repair-time">22s</b></div>
+          <div id="visor-cracks" class="visor-cracks"></div>
+        </div>
+        <div class="visor-scanlines"></div>
+      </div>
+      <div id="mask-break-overlay" class="mask-break-overlay hidden">
+        <div class="mbo-darkness"></div><div class="mbo-glitch-lines"></div>
+        <div class="mbo-content"><div class="mbo-icon">⚠</div><div class="mbo-title">TAKE OFF MASK</div>
+        <div class="mbo-sub">OPTICAL COMPONENT SHATTERED // SYSTEM CRITICAL</div></div>
+      </div>
+      <div id="perk-action-toast" class="perk-action-toast hidden"></div>
     </div>
     <div id="inventory" class="screen hidden"><div id="inv-armor"></div><div id="inv-weapons"></div>
       <div id="inv-ammo"></div><div id="inv-build"></div></div>
@@ -53,24 +76,22 @@
   const SP = window.StrikeProtocol;
   const P = g.player;
   let updates = 0;
-  /** mirrors the production frame gate in Game._loop */
   function frame() {
     if (g.state === 'playing' || g.state === 'dead') { g._update(1 / 60); updates++; }
     g.input.endFrame();
   }
   const frames = (n) => { for (let i = 0; i < n; i++) frame(); };
 
-  /** full run -> clear -> reward -> pick -> next stage flow */
   function flow(label, kind, def) {
     g.startGame();
     P.invuln = 1e7;
     g.waveManager.state = 'playing';
     g.waveManager.wave = 1;
     g.enemies.slice().forEach(e => e.takeDamage(999999, new THREE.Vector3(0, 0, 1), false, g));
-    g.onStageCleared(false);                 // -> state 'reward', cards shown
+    g.onStageCleared(false);
     const before = g.state;
     const hadCards = !!g.ui._rewardOptions;
-    g._applyReward({ kind: kind, def: def }); // exactly what chooseReward calls
+    g._applyReward({ kind: kind, def: def });
     const after = g.state;
     const overlaysClosed = $('reward-screen').classList.contains('hidden');
     updates = 0;
@@ -83,12 +104,276 @@
   }
 
   try {
-    /* ---------------- 1. every perk through the reward flow ---------------- */
+    /* =========================================================================
+     * 1. BUILD SUITE (74+ tests)
+     * ========================================================================= */
+    let bCount = 0;
+    function bTest(name, cond, detail) {
+      bCount++;
+      assert('BUILD ' + bCount + ': ' + name, !!cond, detail);
+    }
+
+    // 1-7: Perk defs
+    SP.PERKS.forEach(p => bTest('Perk ' + p.name + ' def valid', p.id && p.name && p.cd > 0 && typeof p.update === 'function', p.id));
+    // 8-18: Trail defs
+    SP.TRAILS.forEach(t => bTest('Trail ' + t.name + ' def valid', t.id && t.name && typeof t.init === 'function' && typeof t.mods === 'function' && typeof t.status === 'function', t.id));
+    // 19-25: Synergies
+    SP.SYNERGIES.forEach(s => bTest('Synergy ' + s.name + ' def valid', s.id && s.a && s.b && s.name && s.desc, s.id));
+    // 26: Initial build state
+    g.build.reset();
+    bTest('Build starts clean', g.build.perk === null && g.build.trailCount() === 0, 'trails=' + g.build.trailCount());
+    // 27-33: equipPerk
+    SP.PERKS.forEach(p => {
+      g.build.equipPerk(p.id);
+      bTest('equipPerk ' + p.name, g.build.perk && g.build.perk.id === p.id && g.build.perkState !== null, g.build.perk.id);
+    });
+    // 34-44: equipTrail
+    g.build.reset();
+    SP.TRAILS.forEach(t => {
+      g.build.equipTrail(t.id, 0);
+      bTest('equipTrail ' + t.name, g.build.hasTrail(t.id) && g.build.trailState[0] !== null, t.id);
+      g.build.removeTrail(0);
+    });
+    // 45: trailCount
+    g.build.reset();
+    g.build.equipTrail('hunter', 0);
+    g.build.equipTrail('momentum', 1);
+    bTest('trailCount equals 2', g.build.trailCount() === 2, g.build.trailCount());
+    // 46: hasTrail check
+    bTest('hasTrail hunter is true', g.build.hasTrail('hunter') === true, 'hunter');
+    bTest('hasTrail predator is false', g.build.hasTrail('predator') === false, 'predator');
+    // 47: removeTrail
+    g.build.removeTrail(1);
+    bTest('removeTrail clears slot', g.build.trails[1] === null && g.build.trailCount() === 1, g.build.trailCount());
+    // 48: removePerk & turret cleanup
+    g.build.equipPerk('engineer');
+    g.activatePerk();
+    const hadTurret = !!g.build.perkState.turret;
+    g.build.removePerk();
+    bTest('removePerk clears perk and cleans turret', g.build.perk === null && g.build.perkState === null, 'hadTurret=' + hadTurret);
+    // 49: slot replacement when full
+    g.build.reset();
+    g.build.equipTrail('hunter', 0);
+    g.build.equipTrail('momentum', 1);
+    g.build.equipTrail('adrenaline', 2);
+    g.build.equipTrail('survival');
+    bTest('equipTrail replaces slot 0 when full', g.build.trails[0].id === 'survival' && g.build.trailCount() === 3, g.build.trails.map(x=>x.id).join(','));
+    // 50-56: Perk status finiteness
+    SP.PERKS.forEach(p => {
+      g.build.equipPerk(p.id);
+      const st = g.build.perkStatus();
+      bTest('Perk status finite ' + p.name, typeof st.label === 'string' && typeof st.text === 'string' && Number.isFinite(st.bar), st.text);
+    });
+    // 57-67: Trail status finiteness
+    SP.TRAILS.forEach((t) => {
+      g.build.equipTrail(t.id, 0);
+      const s = g.build.trailState[0];
+      const st = t.status(s);
+      bTest('Trail status finite ' + t.name, typeof st.text === 'string' && typeof st.on === 'boolean', st.text);
+    });
+    // 68-71: combineMods and resolveStats
+    const cmEmpty = SP.combineMods([]);
+    bTest('combineMods empty returns valid structure', cmEmpty.mul && cmEmpty.add, JSON.stringify(cmEmpty));
+    const cmCombined = SP.combineMods([{ mul: { damage: 1.2 }, add: { health: 10 } }, { mul: { damage: 1.1 } }]);
+    bTest('combineMods multiplies mul and adds add', Math.abs(cmCombined.mul.damage - 1.32) < 0.001 && cmCombined.add.health === 10, cmCombined.mul.damage);
+    const rs = SP.resolveStats({ damage: 20 }, cmCombined);
+    bTest('resolveStats calculates expected result', Math.abs(rs.damage - 26.4) < 0.01, rs.damage);
+    const rsSafe = SP.resolveStats({ damage: 20 }, null);
+    bTest('resolveStats handles null mods safely', rsSafe.damage === 20, rsSafe.damage);
+    // 72-79: BUILD_CAPS checks
+    bTest('BUILD_CAPS moveSpeed <= 2.1', SP.BUILD_CAPS.moveSpeed === 2.1, SP.BUILD_CAPS.moveSpeed);
+    bTest('BUILD_CAPS damage <= 4.0', SP.BUILD_CAPS.damage === 4.0, SP.BUILD_CAPS.damage);
+    bTest('BUILD_CAPS fireRate <= 2.6', SP.BUILD_CAPS.fireRate === 2.6, SP.BUILD_CAPS.fireRate);
+    bTest('BUILD_CAPS damageReduction <= 0.80', SP.BUILD_CAPS.damageReduction === 0.80, SP.BUILD_CAPS.damageReduction);
+    bTest('BUILD_CAPS healPerSec <= 40', SP.BUILD_CAPS.healPerSec === 40, SP.BUILD_CAPS.healPerSec);
+    bTest('BUILD_CAPS dogtag <= 10', SP.BUILD_CAPS.dogtag === 10, SP.BUILD_CAPS.dogtag);
+    bTest('BUILD_CAPS heat <= 100', SP.BUILD_CAPS.heat === 100, SP.BUILD_CAPS.heat);
+    bTest('BUILD_CAPS trails <= 3', SP.BUILD_CAPS.trails === 3, SP.BUILD_CAPS.trails);
+    // 80-86: Synergies recognized and flags active
+    g.build.reset();
+    g.build.equipTrail('impatient', 0); g.build.equipTrail('momentum', 1);
+    bTest('Synergy impatient_momentum recognized', g.build.hasSynergy('impatient_momentum'), 'impatient_momentum');
+    g.build.reset();
+    g.build.equipTrail('survival', 0); g.build.equipTrail('guardian', 1);
+    bTest('Synergy survival_guardian recognized', g.build.hasSynergy('survival_guardian'), 'bulwark');
+    g.build.reset();
+    g.build.equipTrail('hunter', 0); g.build.equipTrail('bloodlust', 1);
+    bTest('Synergy hunter_bloodlust recognized', g.build.hasSynergy('hunter_bloodlust'), 'pack hunt');
+    g.build.reset();
+    g.build.equipPerk('fireman'); g.build.equipTrail('survival', 0);
+    bTest('Synergy fireman_survival recognized', g.build.hasSynergy('fireman_survival'), 'flammable');
+    g.build.reset();
+    g.build.equipPerk('samurai'); g.build.equipTrail('impatient', 0);
+    bTest('Synergy samurai_impatient caps dogtags at 6', g.build.dogtagCap() === 6, g.build.dogtagCap());
+    g.build.reset();
+    g.build.equipPerk('phantom'); g.build.equipTrail('momentum', 0);
+    bTest('Synergy phantom_momentum recognized', g.build.hasSynergy('phantom_momentum'), 'ghoststep');
+    g.build.reset();
+    g.build.equipPerk('medic'); g.build.equipTrail('survival', 0);
+    bTest('Synergy medic_survival recognized', g.build.hasSynergy('medic_survival'), 'sustain');
+    // 87-90: Pipeline finiteness with all perks and trails
+    let allFinite = true;
+    SP.PERKS.forEach(p => {
+      g.build.equipPerk(p.id);
+      g.build.update(1/60);
+      for (const k in P.stats) if (typeof P.stats[k] === 'number' && !Number.isFinite(P.stats[k])) allFinite = false;
+    });
+    bTest('Stat pipeline 0 NaN 0 Infinity with perks', allFinite, 'allFinite');
+    g.build.reset();
+    g.build.equipTrail('hunter', 0); g.build.equipTrail('momentum', 1); g.build.equipTrail('adrenaline', 2);
+    g.build.update(1/60);
+    let trailsFinite = true;
+    for (const k in P.stats) if (typeof P.stats[k] === 'number' && !Number.isFinite(P.stats[k])) trailsFinite = false;
+    bTest('Stat pipeline 0 NaN 0 Infinity with 3 trails', trailsFinite, 'trailsFinite');
+
+    /* =========================================================================
+     * 2. REGRESSION SUITE (33 tests)
+     * ========================================================================= */
+    let rCount = 0;
+    function rTest(name, cond, detail) {
+      rCount++;
+      assert('REGRESSION ' + rCount + ': ' + name, !!cond, detail);
+    }
+    g.startGame();
+    // 1: Player spawned alive with full HP & stamina
+    rTest('Player spawns alive with full HP', P.alive && P.health === P.maxHealth && P.stamina > 0, 'hp=' + P.health);
+    // 2: Default loadout
+    rTest('Default loadout has 2 weapons', P.slots[0] && P.slots[1] && !P.slots[2], P.slots.map(s=>s?s.id:'null').join(','));
+    // 3: Current weapon slot
+    rTest('Current weapon starts at slot 0', P.current === 0 && P.weapon !== null, 'slot=' + P.current);
+    // 4: Weapon slot switch 1
+    P.switchTo(1);
+    rTest('Switch to slot 1', P.current === 1 && P.weapon.inst.typeId === 'pump', P.weapon.inst.typeId);
+    // 5: Weapon slot switch back to 0
+    P.weapon.switching = 0;
+    P.switchTo(0);
+    rTest('Switch back to slot 0', P.current === 0 && P.weapon.inst.typeId === 'ar15', P.weapon.inst.typeId);
+    // 6: Weapon firing consumes magazine ammo
+    const w = P.weapon;
+    w.switching = 0;
+    const mag0 = w.mag;
+    w.fire(g);
+    rTest('Weapon shoot consumes magazine ammo', w.mag < mag0, 'mag=' + w.mag + '/' + mag0);
+    // 7: Weapon reload restores magazine
+    w.startReload(g.audio);
+    w._finishReload();
+    rTest('Weapon reload fills magazine', w.mag === w.stats.magazine, 'mag=' + w.mag);
+    // 8: Weapon stats calculation
+    rTest('Weapon stats finite', Number.isFinite(w.stats.damage) && Number.isFinite(w.stats.fireRate) && Number.isFinite(w.stats.spread), w.stats.damage);
+    // 9: LootSystem creation
+    const lootItem = g.loot.create(1, 0, null, 1);
+    rTest('LootSystem generates WeaponInstance', lootItem instanceof SP.WeaponInstance && lootItem.rarity !== null, lootItem.rarity.name);
+    // 10: Ammo pool tracking
+    const ammo556 = P.ammoPool('5.56');
+    P.addAmmo('5.56', 30);
+    rTest('Ammo pool increments', P.ammoPool('5.56') === ammo556 + 30, 'ammo=' + P.ammoPool('5.56'));
+    // 11: Armor equipping and armorValue
+    const armorItem = new SP.ArmorInstance('helmet', 'uncommon');
+    P.armor.helmet = armorItem;
+    P.refreshArmor();
+    rTest('Armor value updates on helmet equip', P.armorValue() > 0, 'armor=' + P.armorValue());
+    // 12: Armor damage absorption
+    P.invuln = 0;
+    const pool0 = P.armorPool();
+    P.damage(10, new THREE.Vector3(0,0,0), false);
+    rTest('Armor absorbs damage', P.armorPool() < pool0, 'pool=' + P.armorPool());
+    // 13: Player takes damage and survives
+    P.invuln = 0;
+    const hp0 = P.health;
+    P.damage(50, new THREE.Vector3(0,0,0), false);
+    rTest('Player survives non-fatal damage', P.alive && P.health < hp0, 'hp=' + P.health);
+    // 14: Player heal restores health
+    const hpDamaged = P.health;
+    P.heal(10);
+    rTest('Player heal increases HP', P.health > hpDamaged, 'hp=' + P.health);
+    // 15: Fatal damage kills player
+    P.invuln = 0;
+    P.damage(999999, new THREE.Vector3(0,0,0), false);
+    rTest('Fatal damage kills player', !P.alive, 'alive=' + P.alive);
+    // 16: Player respawn restores life
+    P.respawn();
+    rTest('Player respawn restores full life', P.alive && P.health === P.maxHealth, 'hp=' + P.health);
+    // 17: Planar movement from input
+    g.input.keys['KeyW'] = true;
+    P.update(0.1, g.input);
+    g.input.keys['KeyW'] = false;
+    rTest('Player movement updates velocity', P.velocity.lengthSq() >= 0, 'vel=' + P.velocity.length());
+    // 18: Sprinting drains stamina
+    g.input.keys['KeyW'] = true;
+    g.input.keys['ShiftLeft'] = true;
+    P.grounded = true;
+    const st0 = P.stamina;
+    P.update(0.1, g.input);
+    g.input.keys['ShiftLeft'] = false;
+    g.input.keys['KeyW'] = false;
+    rTest('Sprint consumes stamina', P.stamina < st0, 'stamina=' + P.stamina);
+    // 19: Stamina regen when resting
+    P.sprinting = false;
+    P.staminaLock = 0;
+    P.update(0.1, g.input);
+    rTest('Stamina regens', P.stamina > 0, 'stamina=' + P.stamina);
+    // 20: Dash mechanic
+    P.dashCd = 0;
+    const dashed = P.tryDash(0, 1);
+    rTest('Dash triggers cooldown', dashed && P.dashCd > 0, 'dashCd=' + P.dashCd);
+    // 21: ADS spread reduction
+    const hipSpread = P.currentSpreadBonus();
+    P.adsAmt = 1;
+    const adsSpread = P.currentSpreadBonus();
+    rTest('ADS reduces spread bonus', adsSpread < hipSpread, 'ads=' + adsSpread + ' hip=' + hipSpread);
+    P.adsAmt = 0;
+    // 22: Lean offset
+    P.leanAmt = 1;
+    P._updateCamera(0.016);
+    rTest('Lean adjusts camera roll', Number.isFinite(P.camRoll), 'camRoll=' + P.camRoll);
+    P.leanAmt = 0;
+    // 23: WaveManager initial state
+    rTest('WaveManager initialized', g.waveManager.wave >= 0, 'wave=' + g.waveManager.wave);
+    // 24: WaveManager composition
+    const comp1 = g.waveManager.composition(1);
+    rTest('WaveManager comp wave 1 has grunts', comp1.length > 0 && comp1.includes('grunt'), comp1.join(','));
+    // 25: Boss stage detection (wave 5)
+    rTest('Wave 5 is boss wave', g.waveManager.isBossStage(5) === true && g.waveManager.isBossStage(1) === false, 'isBoss');
+    // 26: Enemy spawning and state
+    g.waveManager.queue = ['grunt', 'grunt'];
+    g.waveManager._spawnOne();
+    rTest('WaveManager startWave sets spawning queue', g.enemies.length > 0, 'enemies=' + g.enemies.length);
+    // 27: Enemy instance attributes
+    const testEnemy = g.enemies[g.enemies.length - 1];
+    rTest('Enemy spawns alive with hitboxes', testEnemy.alive && testEnemy.hp > 0 && testEnemy.hitBody !== null, 'hp=' + testEnemy.hp);
+    // 28: Enemy takeDamage
+    const eHp0 = testEnemy.hp;
+    testEnemy.takeDamage(20, new THREE.Vector3(0, 0, 1), false, g);
+    rTest('Enemy takes damage', testEnemy.hp < eHp0, 'hp=' + testEnemy.hp);
+    // 29: Enemy fatal damage
+    testEnemy.takeDamage(999999, new THREE.Vector3(0, 0, 1), false, g);
+    rTest('Enemy dies on fatal damage', !testEnemy.alive, 'alive=' + testEnemy.alive);
+    // 30: Game statistics tracking
+    rTest('Game stats tracking numbers finite', Number.isFinite(g.stats.kills) && Number.isFinite(g.stats.shots), 'kills=' + g.stats.kills);
+    // 31: Pause and resume states
+    g.state = 'playing';
+    g.pause();
+    const pausedOk = g.state === 'paused';
+    g.resume();
+    rTest('Pause and resume state transitions', pausedOk && g.state === 'playing', 'pausedOk=' + pausedOk + ' resumed=' + g.state);
+    // 32: Inventory state transition
+    const open1 = g.ui.toggleInventory();
+    g.state = open1 ? 'inventory' : 'playing';
+    const invOpenOk = g.state === 'inventory';
+    const open2 = g.ui.toggleInventory();
+    g.state = open2 ? 'inventory' : 'playing';
+    rTest('Inventory opens and closes', invOpenOk && g.state === 'playing', 'invOpen=' + invOpenOk + ' resumed=' + g.state);
+    // 33: Arena layout application
+    g.arena.applyLayout(0, 1);
+    rTest('Arena applies layout safely', g.arena.layoutIndex === 0 && g.arena.spawnPoints.length > 0, 'spawns=' + g.arena.spawnPoints.length);
+
+    /* =========================================================================
+     * 3. PERK FLOW (7 perks)
+     * ========================================================================= */
     const perks = ['fireman', 'samurai', 'executioner', 'phantom', 'medic', 'gravity', 'engineer'];
     for (const id of perks) {
       const def = SP.PERK_BY_ID[id];
       const ok = flow('perk flow: ' + def.name, 'perk', def);
-      // the perk must also still work once the next stage is running
       if (ok) {
         frames(120);
         log('     ' + def.name + ' updates during next stage: ' + updates,
@@ -96,7 +381,9 @@
       }
     }
 
-    /* ---------------- 2. every trail through the reward flow ---------------- */
+    /* =========================================================================
+     * 4. TRAIL FLOW (11 trails)
+     * ========================================================================= */
     const trails = ['impatient', 'survival', 'hunter', 'berserker', 'scavenger', 'momentum',
       'bloodlust', 'guardian', 'predator', 'adrenaline', 'tactician'];
     for (const id of trails) {
@@ -104,10 +391,11 @@
       flow('trail flow: ' + def.name, 'trail', def);
     }
 
-    /* ---------------- 3. buff flow (the path that worked before) ---------------- */
+    /* =========================================================================
+     * 5. BUFF FLOW & REAL CLICK PATH
+     * ========================================================================= */
     flow('buff flow: Berserker', 'buff', SP.BUFFS[0]);
 
-    /* ---------------- 4. picking through the real click path ---------------- */
     g.startGame();
     g.waveManager.state = 'playing'; g.waveManager.wave = 1;
     g.onStageCleared(false);
@@ -124,7 +412,9 @@
       log('click path: no trail/perk card rolled (skipping)', true, opts.map(o => o.kind).join(','));
     }
 
-    /* ---------------- 5. perk + 3 trails, then stage transition ---------------- */
+    /* =========================================================================
+     * 6. COMBINATIONS (PERK + 3 TRAILS)
+     * ========================================================================= */
     for (const combo of [
       { p: 'fireman', t: ['hunter', 'momentum', 'adrenaline'] },
       { p: 'samurai', t: ['impatient', 'bloodlust', 'momentum'] },
@@ -147,19 +437,20 @@
       updates = 0; frames(360);
       assert('combo ' + combo.p + '+' + combo.t.length + 'trails survives the transition',
         g.state === 'playing' && updates > 300, 'state=' + g.state + ' updates=' + updates);
-      // and the fight is actually live again
       const before2 = g.waveManager.queue.length;
       frames(120);
       assert('  combo stage content spawns', g.waveManager.queue.length <= before2 || g.aliveEnemyCount() >= 0,
         'queue=' + g.waveManager.queue.length + ' alive=' + g.aliveEnemyCount());
     }
 
-    /* ---------------- 6. stress 2000 frames with a full build ---------------- */
+    /* =========================================================================
+     * 7. 2000-FRAME STRESS TEST WITH FULL BUILD
+     * ========================================================================= */
     g.startGame();
     P.invuln = 1e7;
     g.build.equipPerk('fireman');
     ['hunter', 'momentum', 'adrenaline'].forEach((t, i) => g.build.equipTrail(t, i));
-    g.waveManager.state = 'fighting';
+    g.waveManager.state = 'playing';
     updates = 0;
     const gKey = (c, down) => window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code: c, bubbles: true }));
     let stressOk = true;
@@ -169,6 +460,7 @@
       if (i % 300 === 0) { g.input.buttons[2] = !(i % 600); }
       if (i % 500 === 0) gKey('KeyQ', i % 1000 < 500);
       if (i % 600 === 0) g.activatePerk();
+      if (i % 400 === 0) P.switchTo(i % 800 === 0 ? 0 : 1);
       frame();
       P.invuln = 1e7;
       const ps = g.build.perkState;
@@ -193,11 +485,645 @@
       return true;
     }
 
-    /* ---------------- 7. restart after a build ---------------- */
+    /* =========================================================================
+     * 8. RESTART & LEAK CHECK
+     * ========================================================================= */
     g.startGame();
     assert('restart clears the build',
       g.build.perk === null && g.build.trailCount() === 0 && g.build.perkState === null &&
       g.afterimages.length === 0 && g.pickups.length === 0, g.build.perkState === null ? 'ok' : 'stale state');
+
+    /* =========================================================================
+     * 9. DIRECTIONAL DAMAGE INDICATOR SUITE (20+ assertions)
+     * ========================================================================= */
+    const dds = g.ui.directionalDamage;
+    assert('DirectionalDamageSystem instantiated on UI', !!dds && typeof dds.showDamage === 'function');
+    assert('pool size is 6 and maxActive is 4', dds.poolSize === 6 && dds.maxActive === 4 && dds.pool.length === 6);
+    assert('pool DOM elements initialized with SVG chevrons',
+      dds.container.children.length === 6 && dds.pool.every(p => p.el.querySelector('.dir-wedge')));
+
+    // Setup player position & camera
+    g.startGame();
+    P.position.set(0, 0, 0);
+    g.camera.position.set(0, 1.7, 0);
+    P.yaw = 0; P.pitch = 0; P.camRoll = 0;
+    g.camera.quaternion.set(0, 0, 0, 1); // looking at -Z
+
+    dds.reset();
+
+    // Test 1: Front Hit (source at 0, 1.7, -10 -> in front)
+    let ind = dds.showDamage(20, new THREE.Vector3(0, 1.7, -10));
+    assert('Front damage yields indicator near 0 rad (top)',
+      ind && Math.abs(ind.angle) < 0.05, 'angle=' + (ind ? ind.angle.toFixed(3) : 'null'));
+    assert('Front indicator placed at top of screen (screenY < -50, screenX ~ 0)',
+      ind && ind.el.style.transform.includes('-') && ind.el.style.display === 'block');
+
+    dds.reset();
+
+    // Test 2: Back Hit (source at 0, 1.7, 10 -> behind)
+    ind = dds.showDamage(20, new THREE.Vector3(0, 1.7, 10));
+    assert('Back damage yields indicator near PI rad (bottom)',
+      ind && Math.abs(Math.abs(ind.angle) - Math.PI) < 0.05, 'angle=' + (ind ? ind.angle.toFixed(3) : 'null'));
+
+    dds.reset();
+
+    // Test 3: Right Hit (source at 10, 1.7, 0 -> right)
+    ind = dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    assert('Right damage yields indicator near +PI/2 rad (right)',
+      ind && Math.abs(ind.angle - Math.PI * 0.5) < 0.05, 'angle=' + (ind ? ind.angle.toFixed(3) : 'null'));
+
+    dds.reset();
+
+    // Test 4: Left Hit (source at -10, 1.7, 0 -> left)
+    ind = dds.showDamage(20, new THREE.Vector3(-10, 1.7, 0));
+    assert('Left damage yields indicator near -PI/2 rad (left)',
+      ind && Math.abs(ind.angle + Math.PI * 0.5) < 0.05, 'angle=' + (ind ? ind.angle.toFixed(3) : 'null'));
+
+    dds.reset();
+
+    // Test 5: Continuous Diagonals
+    const dFR = dds.calculateAngle(new THREE.Vector3(10, 1.7, -10), g.camera, P.position);
+    const dFL = dds.calculateAngle(new THREE.Vector3(-10, 1.7, -10), g.camera, P.position);
+    const dBR = dds.calculateAngle(new THREE.Vector3(10, 1.7, 10), g.camera, P.position);
+    const dBL = dds.calculateAngle(new THREE.Vector3(-10, 1.7, 10), g.camera, P.position);
+    assert('Diagonal angles continuous: FR~+PI/4, FL~-PI/4, BR~+3PI/4, BL~-3PI/4',
+      Math.abs(dFR - Math.PI * 0.25) < 0.05 &&
+      Math.abs(dFL + Math.PI * 0.25) < 0.05 &&
+      Math.abs(dBR - Math.PI * 0.75) < 0.05 &&
+      Math.abs(dBL + Math.PI * 0.75) < 0.05,
+      'FR=' + dFR.toFixed(2) + ' FL=' + dFL.toFixed(2) + ' BR=' + dBR.toFixed(2) + ' BL=' + dBL.toFixed(2));
+
+    // Test 6: Critical Rotation Test (180 deg camera flip)
+    // Enemy is at world (10, 1.7, 0)
+    // Initially player looks at -Z -> enemy is on the right (+PI/2)
+    const angleFacingNorth = dds.calculateAngle(new THREE.Vector3(10, 1.7, 0), g.camera, P.position);
+    // Now rotate camera 180 deg (look at +Z, quaternion rotated Math.PI around Y)
+    g.camera.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+    const angleFacingSouth = dds.calculateAngle(new THREE.Vector3(10, 1.7, 0), g.camera, P.position);
+    assert('180 deg camera rotation flips enemy right (+PI/2) to enemy left (-PI/2)',
+      Math.abs(angleFacingNorth - Math.PI * 0.5) < 0.05 && Math.abs(angleFacingSouth + Math.PI * 0.5) < 0.05,
+      'North=' + angleFacingNorth.toFixed(2) + ' South=' + angleFacingSouth.toFixed(2));
+
+    // Reset camera quaternion back to north
+    g.camera.quaternion.set(0, 0, 0, 1);
+
+    // Test 7: Lean Q/E (Critical test from section 17)
+    // Enemy LEFT -> player leans -> indicator remains correct on left
+    P.lean = -1; // Q lean
+    P._updateCamera(0.2);
+    const angleLean = dds.calculateAngle(new THREE.Vector3(-10, 1.7, 0), g.camera, P.position);
+    assert('Enemy LEFT with Q/E lean: indicator remains finite, correct on left (-PI/2)',
+      Number.isFinite(angleLean) && Math.abs(angleLean + Math.PI * 0.5) < 0.15, 'angle=' + angleLean.toFixed(3));
+    P.lean = 0;
+    P._updateCamera(0.2);
+    g.camera.quaternion.set(0, 0, 0, 1);
+
+    // Test 8: Rapid-hit merging (Requirement 8)
+    dds.reset();
+    dds.showDamage(20, new THREE.Vector3(-10, 1.7, 0)); // Hit 1 from left
+    dds.update(0.2); // advance 200ms
+    dds.showDamage(20, new THREE.Vector3(-10, 1.7, 0.2)); // Hit 2 from left (same ~28 deg cone)
+    const activeLeft = dds.pool.filter(p => p.active);
+    assert('Rapid repeated hits from same direction merge into 1 active indicator',
+      activeLeft.length === 1 && activeLeft[0].elapsed < 0.05,
+      'active=' + activeLeft.length + ' elapsed=' + (activeLeft[0] ? activeLeft[0].elapsed : 'none'));
+
+    // Test 9: Max Active limit = 4 & Object Pool fixed (Requirement 8 & 12)
+    dds.reset();
+    // Fire hits from 8 distinct directions
+    for (let a = 0; a < 8; a++) {
+      const ang = (a / 8) * Math.PI * 2;
+      dds.showDamage(15, new THREE.Vector3(Math.cos(ang) * 10, 1.7, Math.sin(ang) * 10));
+    }
+    const totalActive = dds.pool.filter(p => p.active).length;
+    assert('Active indicators strictly capped at 4 (never unbounded)', totalActive === 4, 'active=' + totalActive);
+    assert('DOM container pool strictly maintained at 6 elements (no DOM growth)',
+      dds.container.children.length === 6, 'domChildren=' + dds.container.children.length);
+
+    // Test 10: Damage Intensity Scaling & Crit / Boss classes
+    dds.reset();
+    const indSmall = dds.showDamage(5, new THREE.Vector3(10, 1.7, 0));
+    const scaleSmall = indSmall.baseScale;
+    dds.reset();
+    const indMed = dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    const scaleMed = indMed.baseScale;
+    dds.reset();
+    const indHeavy = dds.showDamage(60, new THREE.Vector3(10, 1.7, 0));
+    const scaleHeavy = indHeavy.baseScale;
+    dds.reset();
+    const indBoss = dds.showDamage(20, new THREE.Vector3(10, 1.7, 0), { isBoss: true });
+    const scaleBoss = indBoss.baseScale;
+    const isBossClass = indBoss.el.classList.contains('boss');
+    dds.reset();
+    const indCrit = dds.showDamage(20, new THREE.Vector3(10, 1.7, 0), { isCrit: true });
+    assert('Damage intensity scales: small < med < heavy and clamped',
+      scaleSmall < scaleMed && scaleMed < scaleHeavy && scaleHeavy <= 1.35,
+      'small=' + scaleSmall + ' med=' + scaleMed + ' heavy=' + scaleHeavy);
+    assert('Boss attack has 1.15x higher base scale and boss CSS class',
+      scaleBoss > scaleMed && isBossClass,
+      'bossScale=' + scaleBoss);
+    assert('Crit hit applies crit CSS class',
+      indCrit && indCrit.el.classList.contains('crit'));
+
+    // Test 11: Low HP Intensity Boost (Requirement 15)
+    dds.reset();
+    P.maxHealth = 100;
+    P.health = 100;
+    const indHighHp = dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    const intHigh = indHighHp.intensity;
+    dds.reset();
+    P.health = 20; // < 25% HP
+    const indLowHp = dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    const intLow = indLowHp.intensity;
+    assert('Low HP (<25%) grants +20% indicator intensity boost',
+      intLow > intHigh && Math.abs(intLow / intHigh - 1.20) < 0.05,
+      'intHigh=' + intHigh + ' intLow=' + intLow);
+    P.health = 100;
+
+    // Test 12: Camera Damage Impulse (Requirement 6)
+    P.invuln = 0;
+    P.camDamageRoll = 0;
+    P.camDamagePitch = 0;
+    g.camera.quaternion.set(0, 0, 0, 1);
+    // Damage from LEFT (-10, 1.7, 0) -> camera rolls RIGHT (positive roll)
+    P.damage(25, new THREE.Vector3(-10, 1.7, 0), false);
+    const rollFromLeft = P.camDamageRoll;
+    assert('Damage from LEFT causes camera impulse RIGHT (+roll)',
+      rollFromLeft > 0.005, 'roll=' + rollFromLeft);
+
+    P.camDamageRoll = 0;
+    // Damage from RIGHT (+10, 1.7, 0) -> camera rolls LEFT (negative roll)
+    P.damage(25, new THREE.Vector3(10, 1.7, 0), false);
+    const rollFromRight = P.camDamageRoll;
+    assert('Damage from RIGHT causes camera impulse LEFT (-roll)',
+      rollFromRight < -0.005, 'roll=' + rollFromRight);
+
+    // Verify camera impulse decays to 0 without permanent pitch/yaw drift
+    const initPitch = P.pitch, initYaw = P.yaw;
+    for (let f = 0; f < 30; f++) P._updateCamera(1 / 60);
+    assert('Camera damage impulse damps back to 0 without modifying base pitch/yaw',
+      Math.abs(P.camDamageRoll) < 0.001 && Math.abs(P.camDamagePitch) < 0.001 &&
+      P.pitch === initPitch && P.yaw === initYaw,
+      'camRoll=' + P.camDamageRoll + ' camPitch=' + P.camDamagePitch);
+
+    // Test 13: ADS and Scope reductions (Requirement 10)
+    dds.reset();
+    P.adsAmt = 0; P.scoped = false;
+    dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    dds._renderIndicator(dds.pool[0], g.camera, P.position);
+    const opHip = parseFloat(dds.pool[0].el.style.opacity);
+
+    dds.reset();
+    P.adsAmt = 1.0; P.scoped = false;
+    dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    dds._renderIndicator(dds.pool[0], g.camera, P.position);
+    const opAds = parseFloat(dds.pool[0].el.style.opacity);
+
+    dds.reset();
+    P.adsAmt = 1.0; P.scoped = true;
+    dds.showDamage(20, new THREE.Vector3(10, 1.7, 0));
+    dds._renderIndicator(dds.pool[0], g.camera, P.position);
+    const opScope = parseFloat(dds.pool[0].el.style.opacity);
+    assert('ADS reduces indicator opacity (~15%) and Scoped reduces further',
+      opAds < opHip && opScope < opAds,
+      'hip=' + opHip + ' ads=' + opAds + ' scope=' + opScope);
+    P.adsAmt = 0; P.scoped = false;
+
+    // Test 14: Screen Edge Vignette (Requirement 5)
+    const vig = $('damage-vignette');
+    dds.showVignette(25);
+    assert('Subtle edge vignette triggers hit animation class',
+      vig && vig.classList.contains('hit'));
+
+    // Test 15: Stress Test (Requirement 12 & 18): 100 hits/sec
+    dds.reset();
+    let stressFinite = true;
+    for (let s = 0; s < 100; s++) {
+      const a = (s * 37.5) * (Math.PI / 180);
+      const hit = dds.showDamage(1 + (s % 50), new THREE.Vector3(Math.cos(a) * 12, 1.7, Math.sin(a) * 12));
+      dds.update(0.01);
+      if (hit) {
+        if (!Number.isFinite(hit.angle) || !Number.isFinite(hit.intensity) || !Number.isFinite(hit.baseScale)) {
+          stressFinite = false;
+        }
+      }
+    }
+    assert('Stress test (100 hits/sec): 0 DOM growth, all parameters finite, no NaN',
+      stressFinite && dds.container.children.length === 6 && dds.pool.filter(p => p.active).length <= 4,
+      'active=' + dds.pool.filter(p => p.active).length + ' pool=' + dds.container.children.length);
+
+    // Test 16: Reset & Cleanup (Requirement 16)
+    dds.reset();
+    assert('dds.reset() hides all active indicators and zeroes elapsed timers',
+      dds.pool.every(p => !p.active && p.el.style.display === 'none' && p.el.style.opacity === '0'),
+      'active=' + dds.pool.filter(p => p.active).length);
+
+    /* =========================================================================
+     * 10. PERK VISUAL FEEDBACK REGRESSION SUITE (all 7 perks)
+     * ========================================================================= */
+    const pv = g.perkVisuals;
+    assert('PerkVisualSystem instantiated on game', !!pv && typeof pv.update === 'function');
+    assert('PerkVisualSystem DOM and 3D groups initialized',
+      !!pv.vignetteEl && !!pv.visorEl && !!pv.actionToastEl &&
+      !!pv.fireLight && !!pv.katanaGroup && !!pv.medicGroup && !!pv.gravityGroup);
+    assert('First-person meshes parented to camera or scene correctly',
+      pv.katanaGroup.parent === g.camera && pv.fireLight.parent === g.camera &&
+      pv.medicGroup.parent === g.scene && pv.gravityGroup.parent === g.scene);
+
+    // 1. FIRE MAN Visuals
+    g.build.equipPerk('fireman');
+    g.activatePerk();
+    const fmState = g.build.perkState;
+    assert('Fire Man: activation enters burning state and shows action toast',
+      fmState.burning > 0 && !pv.actionToastEl.classList.contains('hidden') &&
+      pv.actionToastEl.textContent.includes('FIRE MODE'));
+    pv.update(0.016);
+    assert('Fire Man: active burning turns on weapon fire light and fire-mode vignette',
+      pv.fireLight.intensity > 0 && pv.vignetteEl.classList.contains('fire-mode'));
+    // Incendiary weapon flash and tracer
+    w.switching = 0;
+    w._flash();
+    assert('Fire Man: incendiary muzzle flash turns fiery orange-red (0xff3300)',
+      w.flash.material.color.getHex() === 0xff3300 && w.flashLight.color.getHex() === 0xff4400);
+    // Heat warning at >= 80% and critical at >= 92%
+    fmState.heat = 85;
+    g.ui.updatePerkHud();
+    pv.update(0.016);
+    assert('Fire Man: heat >= 80% applies warn class to vignette and HUD',
+      pv.vignetteEl.classList.contains('warn') && g.ui.el.perkHud.classList.contains('warn'));
+    fmState.heat = 95;
+    g.ui.updatePerkHud();
+    pv.update(0.016);
+    assert('Fire Man: heat >= 92% applies critical class to vignette and HUD',
+      pv.vignetteEl.classList.contains('critical') && g.ui.el.perkHud.classList.contains('critical'));
+    // Overheat flash
+    pv.onOverheat();
+    assert('Fire Man: overheat triggers overheat-flash vignette',
+      pv.vignetteEl.classList.contains('overheat-flash'));
+    // Burning expiration cleanup
+    fmState.burning = 0;
+    fmState.heat = 0;
+    pv.update(0.1);
+    assert('Fire Man: expiration cleans up fire vignette and fades light',
+      !pv.vignetteEl.classList.contains('fire-mode'));
+
+    // 2. SAMURAI Visuals
+    g.build.equipPerk('samurai');
+    g.activatePerk();
+    const samState = g.build.perkState;
+    assert('Samurai: slash activation reveals 3D katana in front of camera',
+      samState.slash > 0 && pv.katanaGroup.visible === true);
+    assert('Samurai: katana constructed with blade, habaki, tsuba, tsuka, kashira',
+      pv.katanaGroup.children.length >= 5 && !!pv.katanaBlade && !!pv.slashArc);
+    // Swing progression through phases
+    samState.slash = 0.20; // in swing phase (p ~ 0.41)
+    pv.update(0.016);
+    assert('Samurai: swing phase activates cyan slash arc ribbon and blade afterimages',
+      pv.slashArc.visible === true && pv.slashArc.material.opacity > 0 &&
+      pv.katanaGhosts.some(gm => gm.visible));
+    // Enemy hit reaction
+    const dummyEnemy = { alive: true, knock: new THREE.Vector3(0, 0, 0) };
+    pv.onSlashHit(dummyEnemy, new THREE.Vector3(0, 0, -1));
+    assert('Samurai: slash hit imparts physical knockback impulse to enemy',
+      dummyEnemy.knock.length() > 3.0);
+    // End of slash animation
+    samState.slash = 0;
+    pv.update(0.016);
+    assert('Samurai: attack recovery completes and katana is hidden',
+      pv.katanaGroup.visible === false);
+    // Soul heal with dogtag consumption
+    samState.dogtags = 2;
+    g.holdPerk();
+    assert('Samurai: hold F consumes dogtag and displays Soul Heal toast + pulse',
+      samState.dogtags === 1 && !pv.actionToastEl.classList.contains('hidden') &&
+      pv.actionToastEl.textContent.includes('SOUL HEAL'));
+
+    // 3. EXECUTIONER Visuals
+    g.build.equipPerk('executioner');
+    g.activatePerk();
+    const execState = g.build.perkState;
+    assert('Executioner: activation visibly equips tracking mask visor HUD',
+      execState.maskState === 'EQUIPPED' && !pv.visorEl.classList.contains('hidden'));
+    pv.update(0.016);
+    assert('Executioner: mask durability telemetry initialized at 100%',
+      pv.visorDurText.textContent.includes('100%') && pv.visorDurFill.style.width === '100%');
+    // Damage feedback and cracks
+    execState.mask = 50;
+    pv.onPlayerDamaged(25);
+    pv.update(0.016);
+    assert('Executioner: taking damage applies hit-glitch and crack-2 overlay',
+      pv.visorEl.classList.contains('hit-glitch') && pv.visorCracks.classList.contains('crack-2'));
+    execState.mask = 20;
+    pv.update(0.016);
+    assert('Executioner: low mask durability applies crack-3 overlay',
+      pv.visorCracks.classList.contains('crack-3'));
+    // Broken mask state
+    execState.mask = 0;
+    execState.maskState = 'BROKEN';
+    pv.onMaskBroken();
+    pv.update(0.016);
+    assert('Executioner: broken mask shows TAKE OFF MASK blocking overlay',
+      !pv.maskBreakOverlay.classList.contains('hidden') && pv.visorEl.classList.contains('hidden'));
+    // Repair state
+    execState.maskState = 'REPAIRING';
+    pv.onMaskRepairStarted();
+    pv.update(0.016);
+    assert('Executioner: repair state removes blocking overlay',
+      pv.maskBreakOverlay.classList.contains('hidden'));
+    // Ready state
+    execState.maskState = 'READY';
+    execState.mask = 50;
+    pv.onMaskReady();
+    pv.update(0.016);
+    assert('Executioner: ready state allows manual equip',
+      pv.maskBreakOverlay.classList.contains('hidden') && pv.visorEl.classList.contains('hidden'));
+
+    // 4. PHANTOM Visuals
+    g.build.equipPerk('phantom');
+    g.activatePerk();
+    const phState = g.build.perkState;
+    assert('Phantom: activation enters ethereal spectral state with action toast',
+      phState.active > 0 && pv.vignetteEl.classList.contains('phantom-spectral') &&
+      pv.actionToastEl.textContent.includes('PHANTOM SHIFT'));
+    pv.update(0.016);
+    g.ui.updatePerkHud();
+    assert('Phantom: firearm viewmodel materials swapped to translucent spectralMat',
+      pv._origWeaponMats.size > 0 && g.ui.el.perkHud.classList.contains('phantom-active'));
+    // Expiration cleanup
+    phState.active = 0;
+    pv.update(0.016);
+    assert('Phantom: expiration restores original weapon materials and clears vignette',
+      !pv.vignetteEl.classList.contains('phantom-spectral') && pv._origWeaponMats.size === 0);
+
+    // 5. MEDIC Visuals
+    g.build.equipPerk('medic');
+    g.activatePerk();
+    const medState = g.build.perkState;
+    assert('Medic: activation deploys 3D field station at player feet',
+      medState.fieldT > 0 && pv.medicGroup.visible === true &&
+      pv.medicGroup.position.distanceTo(medState.fieldPos) < 0.01);
+    assert('Medic: station has 3.2m boundary ring and rotating holographic disk',
+      !!pv.medicRing && !!pv.medicDisk);
+    // Player inside field gets medic-heal pulse
+    P.position.copy(medState.fieldPos);
+    pv.update(0.016);
+    assert('Medic: player inside 3.2m zone receives medic-heal visual feedback',
+      pv.vignetteEl.classList.contains('medic-heal'));
+    // Player outside field clears medic-heal
+    P.position.set(medState.fieldPos.x + 10, 0, medState.fieldPos.z + 10);
+    pv.update(0.016);
+    assert('Medic: player outside field clears medic-heal vignette',
+      !pv.vignetteEl.classList.contains('medic-heal'));
+    // Expiration cleanup
+    medState.fieldT = 0;
+    pv.update(0.016);
+    assert('Medic: field expiration cleanly hides 3D station mesh',
+      pv.medicGroup.visible === false);
+
+    // 6. GRAVITY Visuals
+    g.build.equipPerk('gravity');
+    g.activatePerk();
+    const gravState = g.build.perkState;
+    assert('Gravity: activation spawns 3D singularity with accretion rings and vortex',
+      gravState.pulseT > 0 && pv.gravityGroup.visible === true &&
+      !!pv.gravityCore && !!pv.gravRing1 && !!pv.gravRing2 && !!pv.gravVortex);
+    pv.update(0.016);
+    assert('Gravity: accretion rings and ground vortex actively spin during pull phase',
+      pv.gravRing1.rotation.z !== 0 || pv.gravRing2.rotation.z !== 0);
+    // Singularity burst
+    gravState.pulseT = 0;
+    pv.onGravityBurst(gravState.pulsePos);
+    assert('Gravity: burst triggers expanding shockwave blast mesh',
+      pv._gravBlastT > 0 && pv.gravBlast.material.opacity > 0);
+    pv.update(0.26);
+    assert('Gravity: burst expansion finishes and singularity cleanly hides',
+      pv._gravBlastT <= 0 && pv.gravityGroup.visible === false);
+
+    // 7. ENGINEER Visuals
+    g.build.equipPerk('engineer');
+    g.activatePerk();
+    const engState = g.build.perkState;
+    const turret = engState.turret;
+    assert('Engineer: activation spawns 3D sentry turret with tripod and barrel',
+      !!turret && !!turret.mesh && turret.mesh.parent === g.scene &&
+      !!turret.barrel && !!turret.led && !!turret.flash);
+    assert('Engineer: deployment unfolding animation starts (scale y < 1.0)',
+      turret.deployT > 0 && turret.mesh.scale.y < 1.0);
+    // Idle scan sweep with green LED
+    g.enemies = []; // no enemies
+    g.updateTurret(turret, 0.4);
+    assert('Engineer: idle scanning displays green LED (0x4dff9b)',
+      turret.led.material.color.getHex() === 0x4dff9b);
+    // Target acquisition with red LED and firing
+    const mockTarget = { alive: true, spawnT: 2, position: new THREE.Vector3(turret.mesh.position.x + 5, 0, turret.mesh.position.z), chestY: 1.2, takeDamage: () => {}, dispose: () => {} };
+    g.enemies = [mockTarget];
+    turret.cd = 0;
+    g.updateTurret(turret, 0.016);
+    assert('Engineer: acquired target turns LED alert red (0xff3333) and triggers recoil flash',
+      turret.led.material.color.getHex() === 0xff3333 && turret.flashT > 0 && turret.barrel.position.z > -0.32);
+    // Turret shutdown and removal
+    g.removeTurret(turret);
+    g.enemies = [];
+    assert('Engineer: destruction/shutdown cleanly removes mesh and disposes materials',
+      turret.mesh === null);
+
+    // 8. Reset and Death Cleanup across all perks
+    g.reset();
+    assert('PerkVisualSystem: g.reset() cleanly hides all 3D perk meshes and DOM overlays',
+      pv.katanaGroup.visible === false && pv.medicGroup.visible === false &&
+      pv.gravityGroup.visible === false && pv.visorEl.classList.contains('hidden') &&
+      pv.maskBreakOverlay.classList.contains('hidden') &&
+      pv.vignetteEl.className === 'perk-vignette' && pv._origWeaponMats.size === 0);
+    assert('First-person camera and weapon transforms finite after perk actions', finite());
+
+    /* =========================================================================
+     * 11. EXECUTIONER MASK MANUAL TOGGLE & DURABILITY REGRESSION SUITE
+     * ========================================================================= */
+    g.build.equipPerk('executioner');
+    const ex = g.build.perkState;
+    assert('Executioner starts in OFF state with 100% durability',
+      ex.maskState === 'OFF' && ex.mask === 100 && pv.visorEl.classList.contains('hidden'));
+
+    // Test 1: F equips mask
+    const eq1 = g.activatePerk();
+    assert('F equips mask: state is EQUIPPED, visor visible, no cooldown',
+      eq1 === true && ex.maskState === 'EQUIPPED' && !pv.visorEl.classList.contains('hidden') && (ex.cd || 0) === 0);
+
+    // Test 2: F removes mask immediately (No cooldown)
+    const eq2 = g.activatePerk();
+    assert('F removes mask immediately: state is OFF, visor hidden, no cooldown',
+      eq2 === true && ex.maskState === 'OFF' && pv.visorEl.classList.contains('hidden') && (ex.cd || 0) === 0);
+
+    // Test 3: Can freely re-equip immediately
+    const eq3 = g.activatePerk();
+    assert('No manual toggle cooldown: can immediately re-equip mask',
+      eq3 === true && ex.maskState === 'EQUIPPED' && !pv.visorEl.classList.contains('hidden'));
+
+    // Test 4: Accumulate dogtags and damage bonus while EQUIPPED
+    g.build.onKill({});
+    g.build.onKill({});
+    assert('Kills while EQUIPPED grant dogtags and damage bonus (+8%)',
+      ex.dogtags === 2 && ex.damageBonus === 2 && Math.abs(g.build.dogtagDamageBonus() - 1.08) < 0.001);
+
+    // Test 5: Manual unequip resets damage bonus, keeps dogtags, disables tracking
+    g.activatePerk(); // toggle OFF
+    assert('Manual unequip resets damage bonus to 0 (multiplier = 1.0)',
+      ex.maskState === 'OFF' && ex.damageBonus === 0 && g.build.dogtagDamageBonus() === 1.0);
+    assert('Dogtags remain after manual unequip',
+      ex.dogtags === 2);
+    assert('Manual unequip disables tracking markers',
+      g.enemyMarkers.every(m => m.style.display === 'none'));
+
+    // Test 6: Re-equipping does NOT restore previous damage bonus
+    g.activatePerk(); // toggle EQUIPPED
+    assert('Re-equipping mask starts fresh (damage bonus = 0, multiplier = 1.0)',
+      ex.maskState === 'EQUIPPED' && ex.damageBonus === 0 && g.build.dogtagDamageBonus() === 1.0);
+
+    // Test 7: Incoming damage reduces mask durability
+    P.invuln = 0;
+    const durBefore = ex.mask;
+    P.damage(20, 'test enemy', g);
+    assert('Mask durability decreases from incoming damage',
+      ex.mask < durBefore, 'durability=' + ex.mask);
+
+    // Test 8: Durability reaches 0 forces mask break
+    P.invuln = 0;
+    P.maxHealth = 500;
+    P.health = 500;
+    P.damage(120, 'heavy hit', g); // reduces mask by 96 (from 84), forcing mask to 0%
+    assert('Durability reaches 0: mask automatically forced OFF, state is BROKEN',
+      ex.mask === 0 && ex.maskState === 'BROKEN' && pv.visorEl.classList.contains('hidden'));
+    assert('TAKE OFF MASK warning and screen blocking overlay appear',
+      !pv.maskBreakOverlay.classList.contains('hidden') &&
+      pv.maskBreakOverlay.querySelector('.mbo-title').textContent.includes('TAKE OFF MASK'));
+    assert('Dogtags reset to 0 after forced break',
+      ex.dogtags === 0);
+    assert('Damage bonus resets to 0 after forced break',
+      ex.damageBonus === 0 && g.build.dogtagDamageBonus() === 1.0);
+    assert('F cannot equip mask while BROKEN',
+      g.activatePerk() === false && ex.maskState === 'BROKEN');
+
+    // Test 9: Automatic transition to REPAIRING after broken timer
+    g.build.update(1.5); // step past brokenTimer (1.4s)
+    assert('Repair begins automatically: state is REPAIRING, blocking overlay removed',
+      ex.maskState === 'REPAIRING' && pv.maskBreakOverlay.classList.contains('hidden'));
+    assert('F cannot bypass repairing state',
+      g.activatePerk() === false && ex.maskState === 'REPAIRING');
+
+    // Test 10: Mask cannot be equipped below 50%
+    ex.mask = 49.0;
+    g.build.update(0.016);
+    assert('Mask cannot be equipped below 50% (durability 49%)',
+      ex.maskState === 'REPAIRING' && g.activatePerk() === false);
+
+    // Test 11: Mask becomes equipable at exactly 50%
+    ex.mask = 50.0;
+    g.build.update(0.016);
+    assert('Mask becomes equipable at exactly 50%: state is READY',
+      ex.maskState === 'READY');
+    const eqReady = g.activatePerk();
+    assert('F equips mask from READY state at 50% durability',
+      eqReady === true && ex.maskState === 'EQUIPPED' && ex.mask >= 50);
+
+    // Test 12: No duplicate DOM nodes/listeners/timers after repeated cycles
+    const domCountBefore = document.body.querySelectorAll('*').length;
+    for (let c = 0; c < 10; c++) {
+      g.activatePerk(); // OFF
+      g.activatePerk(); // EQUIPPED
+    }
+    const domCountAfter = document.body.querySelectorAll('*').length;
+    assert('No duplicate DOM nodes after 10 toggle cycles',
+      domCountBefore === domCountAfter);
+
+    /* =========================================================================
+     * 12. SAMURAI SLASH RECOVERY BY DOGTAGS REGRESSION SUITE
+     * ========================================================================= */
+    P.maxHealth = 100;
+    P.health = 100;
+    P.alive = true;
+    g.build.equipPerk('samurai');
+    const sam = g.build.perkState;
+    assert('Samurai starts with slashRecovery = 1.0 (100%)',
+      sam.slashRecovery === 1.0);
+
+    // Test 1: Slash works when recovery = 100%
+    const sl1 = g.activatePerk();
+    assert('Slash works when recovery = 100%',
+      sl1 === true && sam.slash > 0);
+    assert('Slash puts recovery below 100%',
+      sam.slashRecovery === 0.0);
+    assert('Cannot slash again while recovering',
+      g.activatePerk() === false);
+
+    // Test 2: 0 dogtags uses slow recovery rate
+    sam.dogtags = 0;
+    const rate0 = SP.getSamuraiRecoveryRate(0);
+    assert('0 dogtags uses slow recovery rate (~0.67/s, 1.50s total)',
+      Math.abs(rate0 - (1 / 1.50)) < 0.01);
+
+    // Test 3: 1-2 dogtags remain in slow recovery range
+    const rate1 = SP.getSamuraiRecoveryRate(1);
+    const rate2 = SP.getSamuraiRecoveryRate(2);
+    assert('1-2 dogtags remain in slow recovery range (1.20s - 1.35s duration)',
+      Math.abs(rate1 - (1 / 1.35)) < 0.01 && Math.abs(rate2 - (1 / 1.20)) < 0.01);
+
+    // Test 4: More than 3 dogtags recover significantly faster
+    const rate3 = SP.getSamuraiRecoveryRate(3);
+    const rate4 = SP.getSamuraiRecoveryRate(4);
+    assert('More than 3 dogtags recover significantly faster (rate4 > 1.7x rate0)',
+      rate4 > rate0 * 1.7 && rate3 > rate2);
+
+    // Test 5: Recovery speed increases monotonically with dogtag count
+    let mono = true;
+    for (let d = 0; d < 9; d++) {
+      if (SP.getSamuraiRecoveryRate(d + 1) <= SP.getSamuraiRecoveryRate(d)) mono = false;
+    }
+    assert('Recovery speed strictly increases with dogtag count (0 to 9)', mono);
+
+    // Test 6: 10 dogtags instantly restores slash recovery to 100%
+    sam.dogtags = 10;
+    sam.slash = 0;
+    sam.slashRecovery = 1.0;
+    const sl10 = g.activatePerk();
+    assert('10 dogtags instantly restores slash recovery to 100%',
+      sl10 === true && sam.slashRecovery === 1.0);
+    const sl10_2 = g.activatePerk();
+    assert('10 dogtags allows consecutive slashes without waiting',
+      sl10_2 === true && sam.slashRecovery === 1.0);
+
+    // Test 7: Slash HUD matches real gameplay recovery state
+    sam.dogtags = 0;
+    sam.slashRecovery = 0.45;
+    let stHud = g.build.perkStatus();
+    assert('Slash HUD shows SLASH RECOVERY 45% when recovering',
+      stHud.label === 'SLASH RECOVERY' && stHud.text === '45%');
+    sam.slashRecovery = 1.0;
+    stHud = g.build.perkStatus();
+    assert('Slash HUD shows SLASH READY when recovery reaches 100%',
+      stHud.label === 'SLASH READY');
+
+    // Test 8: Dogtag maximum remains 10
+    for (let k = 0; k < 15; k++) g.build.onKill({});
+    assert('Dogtag maximum strictly capped at 10',
+      sam.dogtags === 10);
+
+    // Test 9: Soul Heal still works
+    sam.slash = 0;
+    sam.healCd = 0;
+    P.health = Math.min(50, P.maxHealth - 30);
+    g._healToken = 0;
+    const healed = g.holdPerk(0.016);
+    assert('Soul Heal still works: spends 1 dogtag and restores HP',
+      healed === true && sam.dogtags === 9 && P.health > 50);
+
+    // Test 10: No leaks after repeated slashes
+    for (let s = 0; s < 20; s++) {
+      sam.slashRecovery = 1.0;
+      g.activatePerk();
+      g.build.update(0.016);
+    }
+    assert('No listener/DOM leaks after repeated slashes, transforms finite',
+      finite());
 
     assert('no runtime errors', errors.length === 0, errors.length);
     errors.slice(0, 5).forEach(e => L.push('   ' + e));

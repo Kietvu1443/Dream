@@ -81,12 +81,42 @@
     </div>
 
     <div id="damage-vignette"></div>
+    <div id="damage-direction-layer"></div>
     <div id="directional-damage"></div>
     <div id="low-hp-pulse"></div>
     <div id="wave-banner"></div>
     <div id="intermission"></div>
     <div id="damage-numbers"></div>
     <div id="buff-toast"></div>
+
+    <!-- Perk Visual Overlays -->
+    <div id="perk-vignette" class="perk-vignette"></div>
+    <div id="executioner-visor" class="executioner-visor hidden">
+      <div class="visor-frame">
+        <div class="visor-bracket vb-tl"></div>
+        <div class="visor-bracket vb-tr"></div>
+        <div class="visor-bracket vb-bl"></div>
+        <div class="visor-bracket vb-br"></div>
+        <div class="visor-header">
+          <span class="vh-tag">EXECUTIONER OPTICS</span>
+          <span id="visor-durability-text" class="vh-dur">MASK: 100%</span>
+        </div>
+        <div class="visor-bar"><div id="visor-durability-fill" style="width:100%"></div></div>
+        <div id="visor-repair-box" class="visor-repair hidden">REPAIRING OPTICS: <b id="visor-repair-time">22s</b></div>
+        <div id="visor-cracks" class="visor-cracks"></div>
+      </div>
+      <div class="visor-scanlines"></div>
+    </div>
+    <div id="mask-break-overlay" class="mask-break-overlay hidden">
+      <div class="mbo-darkness"></div>
+      <div class="mbo-glitch-lines"></div>
+      <div class="mbo-content">
+        <div class="mbo-icon">⚠</div>
+        <div class="mbo-title">TAKE OFF MASK</div>
+        <div class="mbo-sub">OPTICAL COMPONENT SHATTERED // SYSTEM CRITICAL</div>
+      </div>
+    </div>
+    <div id="perk-action-toast" class="perk-action-toast hidden"></div>
   </div>
 
   <!-- ============ INVENTORY (TAB) ============ -->

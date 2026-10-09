@@ -197,6 +197,7 @@
     }
 
     tone(at, vol, f0, f1, dur, type) {
+      if (!this.ctx || !this.enabled) return;
       const o = this.ctx.createOscillator();
       const g = this.ctx.createGain();
       o.type = type || 'sine';
@@ -254,9 +255,18 @@
       src.connect(f); f.connect(g); g.connect(this.master);
     }
 
-    playerHurt() {
+    playerHurt(pan = 0) {
       if (!this.ctx || !this.enabled) return;
       const t0 = this.t;
+      let dest = this.master;
+      if (typeof this.ctx.createStereoPanner === 'function' && typeof pan === 'number' && Number.isFinite(pan)) {
+        try {
+          const panner = this.ctx.createStereoPanner();
+          panner.pan.value = Math.max(-0.75, Math.min(0.75, pan));
+          panner.connect(this.master);
+          dest = panner;
+        } catch (_) {}
+      }
       this.tone(t0, 0.4, 220, 60, 0.3, 'sine');
       const g = this.ctx.createGain();
       const f = this.ctx.createBiquadFilter();
@@ -264,7 +274,7 @@
       f.frequency.value = 700;
       const src = this.noiseSrc(0.5, 0.18);
       this.env(g, t0, 0.34, 0.004, 0.18);
-      src.connect(f); f.connect(g); g.connect(this.master);
+      src.connect(f); f.connect(g); g.connect(dest);
     }
 
     waveStart(n) {
@@ -1771,11 +1781,11 @@
     const out = {};
     const keys = Object.create(null);
     for (const k in base) keys[k] = 1;
-    if (mods.mul) for (const k in mods.mul) keys[k] = 1;
-    if (mods.add) for (const k in mods.add) keys[k] = 1;
+    if (mods && mods.mul) for (const k in mods.mul) keys[k] = 1;
+    if (mods && mods.add) for (const k in mods.add) keys[k] = 1;
     for (const k in keys) {
-      const m = mods.mul && mods.mul[k] !== undefined ? mods.mul[k] : 1;
-      const a = mods.add && mods.add[k] !== undefined ? mods.add[k] : 0;
+      const m = mods && mods.mul && mods.mul[k] !== undefined ? mods.mul[k] : 1;
+      const a = mods && mods.add && mods.add[k] !== undefined ? mods.add[k] : 0;
       let b = base[k];
       if (b === undefined) b = (m !== 1) ? 1 : 0;
       out[k] = b * m + a;
@@ -2761,8 +2771,13 @@
 
       const end = origin.clone().addScaledVector(dir, hitT);
       // tracer is drawn from the muzzle for looks, the damage comes from the eye ray
-      const tr = this.def.tracer;
-      game.tracers.add(muzzle, end, tr[0], tr[1], tr[2], 0.075);
+      const isFire = !!(game.build && game.build.perk && game.build.perk.id === 'fireman' && game.build.perkState && game.build.perkState.burning > 0);
+      if (isFire) {
+        game.tracers.add(muzzle, end, 1.0, 0.35, 0.05, 0.085);
+      } else {
+        const tr = this.def.tracer;
+        game.tracers.add(muzzle, end, tr[0], tr[1], tr[2], 0.075);
+      }
 
       if (victim) {
         let dmg = st.damage * (head ? st.headMul : 1);
@@ -2778,6 +2793,10 @@
         const b = game.build.perkState;
         if (b && game.build.perk.id === 'fireman' && b.burning > 0) {
           game.burnTargets(Math.max(4, dmg * 0.05), 3);
+          game.particles.burst(8, end.x, end.y, end.z, {
+            spread: 1.4, up: 1.2, lifeMin: 0.15, lifeMax: 0.38,
+            sizeMin: 0.03, sizeMax: 0.08, color: [1.0, 0.5, 0.1], grav: -1.5, drag: 2
+          });
         }
         // lifesteal from weapon modifiers
         if (st.lifesteal > 0) game.player.heal(dmg * st.lifesteal);
@@ -2811,7 +2830,21 @@
       this.flash.rotation.z = Math.random() * Math.PI;
       this.flash.rotation.y = rand(-0.35, 0.35);
       this.flash.scale.setScalar(rand(0.75, 1.35));
-      this.flashLight.intensity = 2.4;
+      const isFire = !!(this.game.build && this.game.build.perk && this.game.build.perk.id === 'fireman' && this.game.build.perkState && this.game.build.perkState.burning > 0);
+      if (isFire) {
+        this.flash.material.color.setHex(0xff3300);
+        this.flashLight.color.setHex(0xff4400);
+        this.flashLight.intensity = 3.6;
+        const mw = this.muzzleWorld();
+        this.game.particles.burst(6, mw.x, mw.y, mw.z, {
+          spread: 0.8, up: 0.8, lifeMin: 0.06, lifeMax: 0.18,
+          sizeMin: 0.03, sizeMax: 0.08, color: [1.0, 0.45, 0.05], grav: -1, drag: 2
+        });
+      } else {
+        this.flash.material.color.setHex(0xffdd88);
+        this.flashLight.color.setHex(0xffc060);
+        this.flashLight.intensity = 2.4;
+      }
     }
 
     update(dt, game) {
@@ -3537,7 +3570,7 @@
       const pd = pl.position.distanceTo(at);
       if (pd < cfg.splash && pl.alive) {
         const dir = new THREE.Vector3().subVectors(pl.position, at).normalize();
-        pl.damage(dmg * 0.28 * (1 - pd / cfg.splash), null, false);
+        pl.damage(dmg * 0.28 * (1 - pd / cfg.splash), at, false, { type: 'rocket_splash', sourcePosition: at });
         pl.knockFromBlast = dir.multiplyScalar(4 * (1 - pd / cfg.splash));
       }
     }
@@ -3750,7 +3783,28 @@
    * `player.perk` (heat, dogtags, mask, timers) so it can be reset on restart
    * and asserted for finiteness in the tests.                                */
 
-  const PERK_CD = { fireman: 0.8, samurai: 0.45, executioner: 14, phantom: 16, medic: 15, gravity: 13, engineer: 18 };
+  const PERK_CD = { fireman: 0.8, samurai: 1.5, executioner: 14, phantom: 16, medic: 15, gravity: 13, engineer: 18 };
+
+  const SAMURAI_RECOVERY_DURATIONS = [
+    1.50, // 0 dogtags: slowest (rate ~0.67/s)
+    1.35, // 1 dogtag:  slow (~0.74/s)
+    1.20, // 2 dogtags: slow (~0.83/s)
+    0.85, // 3 dogtags: faster (~1.18/s)
+    0.70, // 4 dogtags: progressively faster (~1.43/s)
+    0.55, // 5 dogtags (~1.82/s)
+    0.42, // 6 dogtags (~2.38/s)
+    0.30, // 7 dogtags (~3.33/s)
+    0.20, // 8 dogtags (~5.00/s)
+    0.10  // 9 dogtags (~10.00/s)
+          // 10 dogtags: instant (0.0s / Infinity)
+  ];
+
+  function getSamuraiRecoveryRate(dogtags) {
+    const d = Math.max(0, Math.min(10, Math.floor(dogtags || 0)));
+    if (d >= 10) return Infinity;
+    const dur = SAMURAI_RECOVERY_DURATIONS[d] !== undefined ? SAMURAI_RECOVERY_DURATIONS[d] : 1.50;
+    return 1 / dur;
+  }
 
   const PERKS = [
     {
@@ -3775,6 +3829,7 @@
           }
           if (p.heat >= BUILD_CAPS.heat) {          // OVERHEAT: hard game over
             p.heat = BUILD_CAPS.heat;
+            if (g.perkVisuals) g.perkVisuals.onOverheat();
             g.audio.tone(g.audio.t, 0.5, 90, 30, 0.9, 'sawtooth');
             g.addShake(1.0);
             g.particles.burst(60, g.player.position.x, g.player.position.y + 1,
@@ -3798,52 +3853,163 @@
         g.burnTargets(burn, 3);
       },
       status: (p) => ({
-        label: p.burning > 0 ? 'FIRE MODE' : 'FIRE MAN',
+        label: p.heat >= 92 ? 'CRITICAL OVERHEAT' : (p.burning > 0 ? 'FIRE MODE' : 'FIRE MAN'),
         bar: p.heat / BUILD_CAPS.heat,
         text: Math.round(p.heat) + '%',
-        warn: p.heat > 80
+        warn: p.heat > 80,
+        critical: p.heat >= 92
       })
     },
     {
       id: 'samurai', name: 'SAMURAI', glyph: '⚔', rarity: 'rare',
-      desc: 'F slashes with a katana. Kills give dogtags (+3% speed). Hold F to spend one on a heal.',
+      desc: 'F slashes with a katana. Recovery scales with dogtags (instant at 10). Hold F to spend one on a heal.',
       cd: PERK_CD.samurai,
+      onEquip: (p) => {
+        p.slashRecovery = 1.0;
+        p.slash = 0;
+        p.healT = 0;
+        p.healCd = 0;
+      },
       update: (p, dt, g) => {
         if (p.slash > 0) p.slash -= dt;
-        return p.slash > 0 || p.healT > 0;
+        if (p.slashRecovery < 1) {
+          const rate = getSamuraiRecoveryRate(p.dogtags);
+          if (rate === Infinity || (p.dogtags || 0) >= 10) {
+            p.slashRecovery = 1.0;
+          } else {
+            p.slashRecovery = Math.min(1, p.slashRecovery + dt * rate);
+          }
+        }
+        return p.slash > 0 || p.healT > 0 || p.slashRecovery < 1;
       },
-      status: (p) => ({ label: 'SAMURAI', text: p.dogtags + ' DOGTAGS', bar: p.dogtags / 10 })
+      status: (p) => {
+        const rec = p.slashRecovery !== undefined ? p.slashRecovery : 1;
+        if (rec < 1) {
+          return {
+            label: 'SLASH RECOVERY',
+            text: Math.round(rec * 100) + '%',
+            bar: rec,
+            warn: rec < 0.5
+          };
+        }
+        return {
+          label: 'SLASH READY',
+          text: (p.dogtags || 0) + ' DOGTAGS',
+          bar: (p.dogtags || 0) / 10
+        };
+      }
     },
     {
       id: 'executioner', name: 'EXECUTIONER', glyph: '🎭', rarity: 'epic',
-      desc: 'F marks enemies through walls and grants +4% damage per dogtag. Damage cracks the mask.',
+      desc: 'F toggles tracking mask. Damage taken reduces durability. At 0%, mask shatters and repairs to 50%.',
       cd: PERK_CD.executioner,
+      onEquip: (p) => {
+        p.mask = 100;
+        p.maskState = 'OFF';
+        p.maskActive = 0;
+        p.maskBroken = false;
+        p.damageBonus = 0;
+        p.brokenTimer = 0;
+      },
       update: (p, dt, g) => {
-        if (p.maskActive > 0) {
-          p.maskActive -= dt;
-          g.updateEnemyMarkers(p.maskActive > 0);
+        const state = p.maskState || 'OFF';
+        if (state === 'EQUIPPED') {
+          p.maskActive = 1;
+          p.maskBroken = false;
+          g.updateEnemyMarkers(true);
+        } else {
+          p.maskActive = 0;
+          g.clearEnemyMarkers();
         }
-        return p.maskActive > 0;
+
+        if (state === 'BROKEN') {
+          p.maskBroken = true;
+          p.brokenTimer = (p.brokenTimer || 0) - dt;
+          if (p.brokenTimer <= 0) {
+            p.maskState = 'REPAIRING';
+            p.brokenTimer = 0;
+            if (g.perkVisuals) g.perkVisuals.onMaskRepairStarted();
+          }
+        } else if (state === 'REPAIRING') {
+          p.maskBroken = true;
+          // Repairing: durability climbs from 0% toward 100% (6.25% per second)
+          p.mask = Math.min(100, (p.mask || 0) + dt * 6.25);
+          if (p.mask >= 50) {
+            p.maskState = 'READY';
+            p.maskBroken = false;
+            if (g.perkVisuals) g.perkVisuals.onMaskReady();
+          }
+        } else if (state === 'READY') {
+          p.maskBroken = false;
+          if (p.mask < 100) p.mask = Math.min(100, p.mask + dt * 6.25);
+        }
+
+        return state === 'EQUIPPED' || state === 'BROKEN' || state === 'REPAIRING';
       },
       onDamaged: (p, amount, g) => {
-        if (p.maskActive > 0) {
-          p.mask = Math.max(0, p.mask - (amount > 30 ? 25 : 10));
+        if (p.maskState === 'EQUIPPED') {
+          const loss = Math.max(10, Math.round(amount * 0.8));
+          p.mask = Math.max(0, p.mask - loss);
           if (p.mask <= 0) {
+            // FORCED MASK BREAK:
+            p.mask = 0;
+            p.maskState = 'BROKEN';
             p.maskActive = 0;
             p.maskBroken = true;
-            p.repairT = 22;
-            g.ui.showBuffToast('MASK BROKEN', 'ABILITY DISABLED');
-            g.audio.tone(g.audio.t, 0.35, 220, 60, 0.4, 'square');
+            p.brokenTimer = 1.4;
+            p.damageBonus = 0;
+            p.dogtags = 0;
             g.clearEnemyMarkers();
+            if (g.perkVisuals) g.perkVisuals.onMaskBroken();
+            g.audio.tone(g.audio.t, 0.45, 260, 50, 0.5, 'square');
+          } else {
+            if (g.perkVisuals) g.perkVisuals.onPlayerDamaged(amount);
           }
         }
       },
-      status: (p) => ({
-        label: p.maskBroken ? 'MASK BROKEN' : 'MASK',
-        text: p.maskBroken ? Math.ceil(p.repairT) + 's' : Math.round(p.mask) + '%',
-        bar: p.maskBroken ? 1 - p.repairT / 22 : p.mask / 100,
-        warn: p.maskBroken || p.mask < 30
-      })
+      status: (p) => {
+        const state = p.maskState || 'OFF';
+        if (state === 'EQUIPPED') {
+          const dur = Math.round(p.mask);
+          const bonus = (p.damageBonus || 0) * 4;
+          return {
+            label: 'MASK EQUIPPED',
+            text: dur + '%' + (bonus > 0 ? ' (+' + bonus + '% DMG)' : ''),
+            bar: p.mask / 100,
+            warn: p.mask < 35,
+            critical: p.mask < 20
+          };
+        } else if (state === 'BROKEN') {
+          return {
+            label: 'TAKE OFF MASK',
+            text: 'BROKEN',
+            bar: 0,
+            warn: true,
+            critical: true
+          };
+        } else if (state === 'REPAIRING') {
+          return {
+            label: 'MASK REPAIRING',
+            text: Math.round(p.mask) + '%',
+            bar: p.mask / 50,
+            warn: true
+          };
+        } else if (state === 'READY') {
+          return {
+            label: 'MASK READY',
+            text: Math.round(p.mask) + '%',
+            bar: p.mask / 100,
+            warn: false
+          };
+        } else { // 'OFF'
+          return {
+            label: 'MASK OFF',
+            text: Math.round(p.mask) + '%',
+            bar: p.mask / 100,
+            warn: false
+          };
+        }
+      }
     },
     {
       id: 'phantom', name: 'PHANTOM', glyph: '👻', rarity: 'epic',
@@ -3974,8 +4140,10 @@
       const replaced = this.perk ? this.perk.name : null;
       this.perk = def;
       this.perkState = {
-        heat: 0, burning: 0, dogtags: 0, mask: 100, maskActive: 0, maskBroken: false,
-        repairT: 0, active: 0, slash: 0, healT: 0, healCd: 0, warned: false,
+        heat: 0, burning: 0, dogtags: 0,
+        mask: 100, maskState: 'OFF', maskActive: 0, maskBroken: false, damageBonus: 0, brokenTimer: 0,
+        slashRecovery: 1.0, slash: 0,
+        repairT: 0, active: 0, healT: 0, healCd: 0, warned: false,
         auraT: 0, beep: 0, tick: 0, trailT: 0, shakeT: 0,
         fieldT: 0, fieldPos: new THREE.Vector3(),
         pulseT: 0, pulsePos: new THREE.Vector3(), turret: null, cd: 0, ticks: 0
@@ -3984,6 +4152,7 @@
       this._syncSynergies();
       this.game.ui.showBuffToast('PERK EQUIPPED', def.name + (replaced ? '...' + replaced : ''));
       this.game.ui.updatePerkHud();
+      if (this.game.perkVisuals) this.game.perkVisuals.onPerkChanged(def);
       return true;
     }
 
@@ -3996,6 +4165,7 @@
       this._syncSynergies();
       this.game.ui.showBuffToast('PERK REMOVED', name);
       this.game.ui.updatePerkHud();
+      if (this.game.perkVisuals) this.game.perkVisuals.onPerkChanged(null);
       return true;
     }
 
@@ -4012,7 +4182,10 @@
       return out;
     }
 
-    hasSynergy(id) { return this.synergyList().indexOf(id) >= 0; }
+    hasSynergy(id) {
+      if (this._synFlags) return !!this._synFlags[id];
+      return this.synergyList().some(s => s.id === id);
+    }
 
     /** live perk readout for the HUD */
     perkStatus() {
@@ -4024,7 +4197,7 @@
         text = s.cd.toFixed(1) + 's';
         bar = 1 - s.cd / Math.max(0.1, this.perk.cd);
       }
-      return { label: st.label, text: text, bar: bar, warn: !!st.warn };
+      return { label: st.label, text: text, bar: bar, warn: !!st.warn, critical: !!st.critical };
     }
 
     _refreshTrailStatus() {
@@ -4043,11 +4216,12 @@
       return 1 + Math.min(s.dogtags, this.dogtagCap()) * 0.03;
     }
 
-    /** executioner: dogtags become damage (through the stat pipeline) */
+    /** executioner: dogtags become damage ONLY when mask is EQUIPPED */
     dogtagDamageBonus() {
       const s = this.perkState;
-      if (!s || this.perk.id !== 'executioner' || s.maskBroken) return 1;
-      return 1 + Math.min(s.dogtags, this.dogtagCap()) * 0.04;
+      if (!s || this.perk.id !== 'executioner' || s.maskState !== 'EQUIPPED') return 1;
+      const bonus = s.damageBonus || 0;
+      return 1 + Math.min(bonus, this.dogtagCap()) * 0.04;
     }
 
     /** phantom trades half of your armour pool for mobility */
@@ -4143,9 +4317,11 @@
       }
       const ps = this.perkState;
       if (this.perk && ps) {
-        if (this.perk.id === 'samurai') ps.dogtags = Math.min(this.dogtagCap(), ps.dogtags + 1);
-        else if (this.perk.id === 'executioner' && ps.maskActive > 0) {
+        if (this.perk.id === 'samurai') {
           ps.dogtags = Math.min(this.dogtagCap(), ps.dogtags + 1);
+        } else if (this.perk.id === 'executioner' && ps.maskState === 'EQUIPPED') {
+          ps.dogtags = Math.min(this.dogtagCap(), ps.dogtags + 1);
+          ps.damageBonus = Math.min(this.dogtagCap(), (ps.damageBonus || 0) + 1);
         }
       }
       this.apply();
@@ -4180,6 +4356,7 @@
     }
 
     reset() {
+      if (this.perkState && this.perkState.turret) this.game.removeTurret(this.perkState.turret);
       this.trails = [null, null, null];
       this.trailState = [null, null, null];
       this.perk = null;
@@ -4223,6 +4400,9 @@
       this.camDipImpulse = 0;     // raw landing impulse that decays to rest
       this.camKick = 0;           // recoil punch along the view axis (smoothed)
       this.camKickImpulse = 0;
+      this.camRoll = 0;
+      this.camDamageRoll = 0;     // temporary directional damage flinch roll
+      this.camDamagePitch = 0;    // temporary directional damage flinch pitch
       this.fov = CFG.fov;
       this.fovTarget = CFG.fov;
       this.lastGrounded = true;
@@ -4607,7 +4787,7 @@
      * Damage intake: armour soaks damage first (helmet cuts headshots, vest cuts
      * body damage), the remainder goes into health.
      */
-    damage(amount, sourcePos, isHead) {
+    damage(amount, sourcePos, isHead, options = null) {
       if (!this.alive || this.invuln > 0) return;
       let dmg = amount;
       const armorHit = { amount: 0, broke: false, head: !!isHead };
@@ -4626,11 +4806,58 @@
 
       this.health = Math.max(0, this.health - dmg);
       this.game.build.onDamaged(amount);
-      this.game.audio.playerHurt();
-      this.game.ui.showDamage();
+      if (this.game.perkVisuals) this.game.perkVisuals.onPlayerDamaged(amount);
+
+      let audioPan = 0;
+      if (sourcePos && this.camera) {
+        const pPos = this.position;
+        const dx = sourcePos.x - pPos.x;
+        const dy = sourcePos.y - pPos.y;
+        const dz = sourcePos.z - pPos.z;
+        const distSq = dx * dx + dz * dz;
+        if (distSq > 0.05) {
+          const invLen = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz);
+          const nx = dx * invLen;
+          const ny = dy * invLen;
+          const nz = dz * invLen;
+
+          const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+          const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+          const hitRight = nx * right.x + ny * right.y + nz * right.z;
+          const hitFwd = nx * fwd.x + ny * fwd.y + nz * fwd.z;
+
+          if (Number.isFinite(hitRight)) {
+            audioPan = clamp(hitRight * 0.75, -0.75, 0.75);
+
+            // Camera damage impulse:
+            // Damage from LEFT (hitRight < 0): tiny camera impulse RIGHT (+roll)
+            // Damage from RIGHT (hitRight > 0): tiny camera impulse LEFT (-roll)
+            // normal: ~0.5–1° (0.012 rad), heavy: ~1.5° (0.026 rad), boss: ~2° (0.035 rad)
+            let mag = 0.012;
+            const isBoss = options && (options.isBoss || options.type === 'boss_slam' || options.type === 'boss_attack');
+            if (isBoss) mag = 0.035;
+            else if (amount >= 30) mag = 0.026;
+
+            const rollImp = -hitRight * mag;
+            const pitchImp = (hitFwd > 0 ? 0.4 : -0.4) * mag;
+            this.camDamageRoll = clamp((this.camDamageRoll || 0) + rollImp, -0.055, 0.055);
+            this.camDamagePitch = clamp((this.camDamagePitch || 0) + pitchImp, -0.045, 0.045);
+          }
+        }
+      }
+
+      this.game.audio.playerHurt(audioPan);
+      this.game.ui.showDamage(amount);
       this.game.ui.showArmorHit(armorHit);
       this.game.addShake(0.22 + amount * 0.01);
-      if (sourcePos) this.game.ui.showDirectionalDamage(sourcePos, this.camera);
+      if (sourcePos) {
+        this.game.ui.showDirectionalDamage(sourcePos, this.camera, amount, {
+          head: !!isHead,
+          isCrit: !!isHead,
+          isBoss: options && (options.isBoss || options.type === 'boss_slam' || options.type === 'boss_attack'),
+          type: options ? options.type : null
+        });
+      }
       if (isHead) this.game.addShake(0.28);
       if (this.health <= 0) this.die();
     }
@@ -4658,6 +4885,8 @@
       if (!this.alive) return;
       this.alive = false;
       this.deathT = 0;
+      this.camDamageRoll = 0;
+      this.camDamagePitch = 0;
       this.velocity.set(0, 0, 0);
       const w = this.weapon;
       if (w) w.group.visible = false;
@@ -4694,6 +4923,7 @@
       this.invuln = 1.5;
       this.camDip = 0; this.camDipImpulse = 0; this.camKick = 0; this.camKickImpulse = 0;
       this.camBobY = 0; this.camBobX = 0; this.camBobT = 0; this.landImpact = 0;
+      this.camRoll = 0; this.camDamageRoll = 0; this.camDamagePitch = 0;
       this.fov = CFG.fov; this.fovTarget = CFG.fov;
       this.fallSpeed = 0;
       this._equipDefaultLoadout();
@@ -4996,12 +5226,17 @@
       const leanRoll = -this.leanAmt * CFG.leanMaxRoll;
       const targetRoll = clamp(-strafe * 0.006, -0.055, 0.055) + this.camKick * 0.05 + leanRoll;
       this.camRoll = lerp(this.camRoll, targetRoll, damp(9, dt));
+      this.camDamageRoll = lerp(this.camDamageRoll || 0, 0, damp(14, dt));
+      this.camDamagePitch = lerp(this.camDamagePitch || 0, 0, damp(14, dt));
       // belt and braces: one bad frame must never permanently poison the camera
       if (!isFinite(this.camRoll)) this.camRoll = 0;
+      if (!isFinite(this.camDamageRoll)) this.camDamageRoll = 0;
+      if (!isFinite(this.camDamagePitch)) this.camDamagePitch = 0;
       if (!isFinite(this.camDip) || !isFinite(this.camKick) || !isFinite(this.camBobX) || !isFinite(this.camBobY)) {
         this.camDip = 0; this.camKick = 0; this.camBobX = 0; this.camBobY = 0;
       }
-      cam.rotation.z = this.camRoll;
+      cam.rotation.x = this.pitch + this.camDamagePitch;
+      cam.rotation.z = this.camRoll + this.camDamageRoll;
       cam.updateMatrixWorld(true);
     }
 
@@ -5424,6 +5659,14 @@
       /* ---- burn damage over time (fire man): plain numbers, no timers ---- */
       if (this.burnT > 0) {
         this.burnT -= dt;
+        this.burnFxT = (this.burnFxT || 0) - dt;
+        if (this.burnFxT <= 0) {
+          this.burnFxT = 0.08;
+          game.particles.burst(1, this.position.x + rand(-0.25, 0.25), this.position.y + rand(0.3, 1.2), this.position.z + rand(-0.25, 0.25), {
+            spread: 0.25, up: 1.5, lifeMin: 0.25, lifeMax: 0.55,
+            sizeMin: 0.03, sizeMax: 0.08, color: [1.0, 0.45 + Math.random() * 0.35, 0.08], grav: -2.2, drag: 1.2
+          });
+        }
         this.burnTick -= dt;
         if (this.burnTick <= 0) {
           this.burnTick = 0.5;
@@ -5517,7 +5760,7 @@
           game.addShake(0.45);
           game.audio.tone(game.audio.t, 0.3, 160, 50, 0.35, 'sawtooth');
           if (player.alive && dist < t.slamRange + 0.8) {
-            player.damage(t.slamDamage * (1 + enrage * 0.4), this.position, false);
+            player.damage(t.slamDamage * (1 + enrage * 0.4), this.position, false, { type: 'boss_slam', isBoss: true });
           }
           this._setPhase('advance');
         }
@@ -5610,8 +5853,8 @@
       });
       const tb = rayAABB(origin, dir, player.hitHead.min, player.hitHead.max, hitT);
       const tbd = rayAABB(origin, dir, player.hitBody.min, player.hitBody.max, hitT);
-      if (tb < hitT) player.damage(damage * 1.5, this.position, true);
-      else if (tbd < hitT) player.damage(damage, this.position, false);
+      if (tb < hitT) player.damage(damage * 1.5, this.position, true, { type: 'boss_attack', isBoss: true });
+      else if (tbd < hitT) player.damage(damage, this.position, false, { type: 'boss_attack', isBoss: true });
       else if (hitT < 90) {
         game.particles.burst(4, end.x, end.y, end.z, {
           spread: 1.4, up: 1.4, lifeMin: 0.1, lifeMax: 0.3,
@@ -5663,7 +5906,7 @@
       if (player.alive) {
         const d = player.position.distanceTo(p);
         if (d < t.blastRadius) {
-          player.damage(t.damage * (1 - d / t.blastRadius), p, false);
+          player.damage(t.damage * (1 - d / t.blastRadius), p, false, { type: 'exploder', sourcePosition: p, isExplosion: true });
         }
       }
       this.hp = 0;
@@ -5848,7 +6091,7 @@
       if (t.mode === 'melee') {
         // melee: instant damage if still in range
         if (dist < t.attackRange + 0.4 && game.player.alive) {
-          game.player.damage(this.damage, this.position, false);
+          game.player.damage(this.damage, this.position, false, { type: 'melee', source: this });
         }
         const p = this.position;
         game.particles.burst(6, p.x, this.chestY, p.z - Math.cos(this.yaw) * 0.6, {
@@ -5901,7 +6144,7 @@
       });
 
       if (hitPlayer) {
-        player.damage(this.damage * (head ? 1.8 : 1), this.position, head);
+        player.damage(this.damage * (head ? 1.8 : 1), this.position, head, { type: 'bullet', source: this });
         game.particles.burst(6, end.x, end.y, end.z, {
           spread: 1.6, up: 1.6, lifeMin: 0.12, lifeMax: 0.35,
           sizeMin: 0.02, sizeMax: 0.05, color: [0.8, 0.1, 0.1], grav: 9, drag: 2
@@ -6301,6 +6544,959 @@
     }
   }
 
+  /* ============================================== DIRECTIONAL DAMAGE SYSTEM */
+
+  class DirectionalDamageSystem {
+    constructor(game, container) {
+      this.game = game;
+      this.container = container;
+      this.poolSize = 6;
+      this.maxActive = 4;
+      this.pool = [];
+      this._initPool();
+    }
+
+    _initPool() {
+      if (!this.container) return;
+      this.container.innerHTML = '';
+      this.pool = [];
+      for (let i = 0; i < this.poolSize; i++) {
+        const el = document.createElement('div');
+        el.className = 'dir-indicator';
+        el.setAttribute('data-index', String(i));
+        el.innerHTML = '<svg viewBox="0 0 52 28" class="dir-svg" aria-hidden="true"><path class="dir-wedge" d="M 6 23 L 26 7 L 46 23 L 26 15 Z" /></svg>';
+        el.style.display = 'none';
+        el.style.opacity = '0';
+        this.container.appendChild(el);
+
+        this.pool.push({
+          id: i,
+          el: el,
+          active: false,
+          worldPos: new THREE.Vector3(),
+          amount: 0,
+          baseScale: 1.0,
+          intensity: 1.0,
+          elapsed: 0,
+          duration: 0.65,
+          angle: 0,
+          isCrit: false,
+          isBoss: false
+        });
+      }
+    }
+
+    showDamage(amount, sourcePosition, options = {}) {
+      if (!sourcePosition || typeof sourcePosition.x !== 'number') return null;
+      if (!Number.isFinite(sourcePosition.x) || !Number.isFinite(sourcePosition.y) || !Number.isFinite(sourcePosition.z)) return null;
+
+      const player = this.game.player;
+      if (!player || !player.camera) return null;
+
+      const pPos = player.position || player.camera.position;
+      const dx = sourcePosition.x - pPos.x;
+      const dz = sourcePosition.z - pPos.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq < 0.05) return null; // self-damage or at player position
+
+      const camera = player.camera;
+      const currentAngle = this.calculateAngle(sourcePosition, camera, pPos);
+      if (!Number.isFinite(currentAngle)) return null;
+
+      const isCrit = !!(options && (options.head || options.isCrit));
+      const isBoss = !!(options && (options.isBoss || options.type === 'boss_slam' || options.type === 'boss_attack'));
+
+      // Intensity scaling based on damage (Requirement 4)
+      let dmgScale = 1.0;
+      if (amount <= 10) {
+        dmgScale = 0.85;
+      } else if (amount <= 30) {
+        dmgScale = 1.0;
+      } else {
+        dmgScale = Math.min(1.25, 1.0 + (amount - 30) * 0.007);
+      }
+      if (isBoss) dmgScale *= 1.15;
+      dmgScale = Math.max(0.75, Math.min(1.35, dmgScale));
+
+      // Low HP intensity bump (Requirement 15)
+      let hpMod = 1.0;
+      if (player.maxHealth > 0) {
+        const hpPct = player.health / player.maxHealth;
+        if (hpPct < 0.25) hpMod = 1.20;
+        else if (hpPct < 0.50) hpMod = 1.10;
+      }
+
+      const baseIntensity = Math.min(1.4, dmgScale * hpMod);
+
+      // Check merging: repeated hits from same direction (~28 deg / 0.48 rad)
+      for (let i = 0; i < this.pool.length; i++) {
+        const item = this.pool[i];
+        if (item.active) {
+          const diff = Math.atan2(Math.sin(currentAngle - item.angle), Math.cos(currentAngle - item.angle));
+          if (Math.abs(diff) < 0.48) {
+            item.worldPos.copy(sourcePosition);
+            item.elapsed = 0;
+            item.intensity = Math.min(1.4, Math.max(item.intensity, baseIntensity) + 0.12);
+            if (isCrit) item.isCrit = true;
+            if (isBoss) item.isBoss = true;
+            item.el.className = 'dir-indicator' + (item.isCrit ? ' crit' : '') + (item.isBoss ? ' boss' : '');
+            this._renderIndicator(item, camera, pPos);
+            return item;
+          }
+        }
+      }
+
+      // Find slot (max 4 active)
+      const activeList = this.pool.filter(item => item.active);
+      let target = null;
+      if (activeList.length < this.maxActive) {
+        target = this.pool.find(item => !item.active);
+      }
+      if (!target && activeList.length > 0) {
+        target = activeList.reduce((oldest, item) => item.elapsed > oldest.elapsed ? item : oldest, activeList[0]);
+      }
+      if (!target) return null;
+
+      target.active = true;
+      target.worldPos.copy(sourcePosition);
+      target.amount = amount;
+      target.baseScale = dmgScale;
+      target.intensity = baseIntensity;
+      target.elapsed = 0;
+      target.duration = 0.65;
+      target.angle = currentAngle;
+      target.isCrit = isCrit;
+      target.isBoss = isBoss;
+
+      target.el.className = 'dir-indicator' + (isCrit ? ' crit' : '') + (isBoss ? ' boss' : '');
+      target.el.style.display = 'block';
+
+      this._renderIndicator(target, camera, pPos);
+      return target;
+    }
+
+    calculateAngle(sourcePosition, camera, playerPos) {
+      const pPos = playerPos || (this.game.player ? this.game.player.position : camera.position);
+      const dir = new THREE.Vector3().subVectors(sourcePosition, pPos);
+      const len = dir.length();
+      if (len < 1e-4) return 0;
+      dir.multiplyScalar(1 / len);
+
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+
+      let x = dir.dot(right);
+      let y = dir.dot(fwd);
+
+      if (Math.hypot(x, y) < 0.05) {
+        const fwdH = new THREE.Vector3(fwd.x, 0, fwd.z);
+        const rightH = new THREE.Vector3(right.x, 0, right.z);
+        const dirH = new THREE.Vector3(dir.x, 0, dir.z);
+        if (fwdH.lengthSq() > 1e-4 && rightH.lengthSq() > 1e-4 && dirH.lengthSq() > 1e-4) {
+          fwdH.normalize();
+          rightH.normalize();
+          dirH.normalize();
+          x = dirH.dot(rightH);
+          y = dirH.dot(fwdH);
+        }
+      }
+
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
+      const angle = Math.atan2(x, y);
+      return Number.isFinite(angle) ? angle : 0;
+    }
+
+    update(dt) {
+      const player = this.game.player;
+      if (!player || !player.camera) return;
+      const camera = player.camera;
+      const pPos = player.position || camera.position;
+
+      for (let i = 0; i < this.pool.length; i++) {
+        const item = this.pool[i];
+        if (!item.active) continue;
+
+        item.elapsed += dt;
+        if (item.elapsed >= item.duration) {
+          item.active = false;
+          item.el.style.display = 'none';
+          item.el.style.opacity = '0';
+          continue;
+        }
+
+        this._renderIndicator(item, camera, pPos);
+      }
+    }
+
+    _renderIndicator(item, camera, pPos) {
+      const angle = this.calculateAngle(item.worldPos, camera, pPos);
+      item.angle = angle;
+
+      const W = (typeof window !== 'undefined' && window.innerWidth) ? window.innerWidth : 1280;
+      const H = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 720;
+
+      const radiusX = Math.max(80, W * 0.43);
+      const radiusY = Math.max(80, H * 0.41);
+
+      const screenX = Math.sin(angle) * radiusX;
+      const screenY = -Math.cos(angle) * radiusY;
+
+      if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return;
+
+      const progress = Math.min(1.0, Math.max(0, item.elapsed / item.duration));
+
+      let punchScale = 1.0;
+      if (progress <= 0.15) {
+        punchScale = 1.0 + (progress / 0.15) * 0.12;
+      } else if (progress <= 0.38) {
+        punchScale = 1.12 - ((progress - 0.15) / 0.23) * 0.12;
+      } else {
+        punchScale = 1.0;
+      }
+
+      let opacityProgress = 1.0;
+      if (progress <= 0.20) {
+        opacityProgress = 1.0;
+      } else {
+        const fadeFrac = (progress - 0.20) / 0.80;
+        opacityProgress = Math.pow(Math.max(0, 1.0 - fadeFrac), 1.35);
+      }
+
+      let alpha = 0.70 * opacityProgress * item.intensity;
+
+      const p = this.game.player;
+      let scopeScale = 1.0;
+      if (p) {
+        if (p.scoped) {
+          alpha *= 0.65;
+          scopeScale = 0.82;
+        } else if (p.adsAmt > 0.05) {
+          const k = Math.min(1, p.adsAmt);
+          alpha *= lerp(1.0, 0.85, k);
+          scopeScale = lerp(1.0, 0.90, k);
+        }
+      }
+
+      alpha = Math.max(0, Math.min(0.85, alpha));
+      const totalScale = item.baseScale * punchScale * scopeScale;
+      const rotDeg = angle * (180 / Math.PI);
+
+      item.el.style.transform = `translate(${screenX.toFixed(1)}px, ${screenY.toFixed(1)}px) rotate(${rotDeg.toFixed(1)}deg) scale(${totalScale.toFixed(2)})`;
+      item.el.style.opacity = alpha.toFixed(3);
+    }
+
+    showVignette(amount = 20) {
+      const v = (this.game.ui && this.game.ui.el) ? this.game.ui.el.vignette : document.getElementById('damage-vignette');
+      if (!v) return;
+      v.classList.remove('hit');
+      void v.offsetWidth;
+      v.classList.add('hit');
+    }
+
+    hide() {
+      this.reset();
+    }
+
+    reset() {
+      for (let i = 0; i < this.pool.length; i++) {
+        const item = this.pool[i];
+        item.active = false;
+        item.elapsed = 0;
+        if (item.el) {
+          item.el.style.display = 'none';
+          item.el.style.opacity = '0';
+        }
+      }
+    }
+
+    cleanup() {
+      this.reset();
+      if (this.container) {
+        this.container.innerHTML = '';
+      }
+      this.pool = [];
+    }
+  }
+
+  /* ============================================== PERK VISUAL FEEDBACK SYSTEM */
+
+  class PerkVisualSystem {
+    constructor(game) {
+      this.game = game;
+      this.scene = game.scene;
+      this.camera = game.camera;
+
+      this._initDOM();
+      this._initFireMan();
+      this._initKatana();
+      this._initMedicField();
+      this._initGravitySingularity();
+
+      this._lastMask = 100;
+      this._maskBrokenPrev = false;
+      this._phantomPrev = false;
+      this._origWeaponMats = new Map();
+      this.spectralMat = new THREE.MeshStandardMaterial({
+        color: 0x6644ff,
+        roughness: 0.35,
+        metalness: 0.5,
+        emissive: 0x331188,
+        transparent: true,
+        opacity: 0.65
+      });
+      this._toastTimer = 0;
+    }
+
+    _initDOM() {
+      const $ = (id) => document.getElementById(id);
+      let v = $('perk-vignette');
+      if (!v && this.game.ui && this.game.ui.el && this.game.ui.el.hud) {
+        v = document.createElement('div');
+        v.id = 'perk-vignette';
+        v.className = 'perk-vignette';
+        this.game.ui.el.hud.appendChild(v);
+      }
+      this.vignetteEl = v;
+
+      let ev = $('executioner-visor');
+      if (!ev && this.game.ui && this.game.ui.el && this.game.ui.el.hud) {
+        ev = document.createElement('div');
+        ev.id = 'executioner-visor';
+        ev.className = 'executioner-visor hidden';
+        ev.innerHTML = '<div class="visor-frame">' +
+          '<div class="visor-bracket vb-tl"></div><div class="visor-bracket vb-tr"></div>' +
+          '<div class="visor-bracket vb-bl"></div><div class="visor-bracket vb-br"></div>' +
+          '<div class="visor-header"><span class="vh-tag">EXECUTIONER OPTICS</span><span id="visor-durability-text" class="vh-dur">MASK: 100%</span></div>' +
+          '<div class="visor-bar"><div id="visor-durability-fill" style="width:100%"></div></div>' +
+          '<div id="visor-repair-box" class="visor-repair hidden">REPAIRING OPTICS: <b id="visor-repair-time">22s</b></div>' +
+          '<div id="visor-cracks" class="visor-cracks"></div>' +
+          '</div><div class="visor-scanlines"></div>';
+        this.game.ui.el.hud.appendChild(ev);
+      }
+      this.visorEl = ev;
+      this.visorDurText = $('visor-durability-text');
+      this.visorDurFill = $('visor-durability-fill');
+      this.visorRepairBox = $('visor-repair-box');
+      this.visorRepairTime = $('visor-repair-time');
+      this.visorCracks = $('visor-cracks');
+
+      let at = $('perk-action-toast');
+      if (!at && this.game.ui && this.game.ui.el && this.game.ui.el.hud) {
+        at = document.createElement('div');
+        at.id = 'perk-action-toast';
+        at.className = 'perk-action-toast hidden';
+        this.game.ui.el.hud.appendChild(at);
+      }
+      this.actionToastEl = at;
+
+      let mbo = $('mask-break-overlay');
+      if (!mbo && this.game.ui && this.game.ui.el && this.game.ui.el.hud) {
+        mbo = document.createElement('div');
+        mbo.id = 'mask-break-overlay';
+        mbo.className = 'mask-break-overlay hidden';
+        mbo.innerHTML = '<div class="mbo-darkness"></div><div class="mbo-glitch-lines"></div>' +
+          '<div class="mbo-content"><div class="mbo-icon">⚠</div><div class="mbo-title">TAKE OFF MASK</div>' +
+          '<div class="mbo-sub">OPTICAL COMPONENT SHATTERED // SYSTEM CRITICAL</div></div>';
+        this.game.ui.el.hud.appendChild(mbo);
+      }
+      this.maskBreakOverlay = mbo;
+    }
+
+    _initFireMan() {
+      this.fireLight = new THREE.PointLight(0xff5511, 0, 3.5, 2);
+      this.camera.add(this.fireLight);
+      this.fireLight.position.set(0.18, -0.15, -0.32);
+      this._fireEmberT = 0;
+    }
+
+    _initKatana() {
+      this.katanaGroup = new THREE.Group();
+      this.katanaGroup.renderOrder = 14;
+      this.camera.add(this.katanaGroup);
+
+      // Curved steel katana blade
+      const bladeGeo = boxGeo(0.016, 0.045, 0.74);
+      const bladeMat = new THREE.MeshStandardMaterial({
+        color: 0xecf0f5,
+        metalness: 0.88,
+        roughness: 0.16,
+        emissive: 0x223344
+      });
+      this.katanaBlade = new THREE.Mesh(bladeGeo, bladeMat);
+      this.katanaBlade.position.set(0, 0, -0.37);
+      this.katanaBlade.rotation.x = -0.05;
+
+      // Habaki
+      const habakiMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.9, roughness: 0.25 });
+      const habaki = new THREE.Mesh(boxGeo(0.022, 0.052, 0.04), habakiMat);
+      habaki.position.set(0, 0, -0.02);
+
+      // Tsuba
+      const tsubaMat = new THREE.MeshStandardMaterial({ color: 0x181a20, metalness: 0.7, roughness: 0.4 });
+      const tsuba = new THREE.Mesh(cylGeo(0.055, 0.055, 0.008, 12), tsubaMat);
+      tsuba.rotation.x = Math.PI / 2;
+
+      // Tsuka
+      const tsukaMat = new THREE.MeshStandardMaterial({ color: 0x111116, roughness: 0.8 });
+      const tsuka = new THREE.Mesh(boxGeo(0.02, 0.038, 0.24), tsukaMat);
+      tsuka.position.set(0, 0, 0.12);
+
+      // Kashira
+      const kashira = new THREE.Mesh(boxGeo(0.022, 0.04, 0.02), habakiMat);
+      kashira.position.set(0, 0, 0.24);
+
+      this.katanaGroup.add(this.katanaBlade);
+      this.katanaGroup.add(habaki);
+      this.katanaGroup.add(tsuba);
+      this.katanaGroup.add(tsuka);
+      this.katanaGroup.add(kashira);
+
+      // Slash arc trail ribbon
+      const arcGeo = new THREE.RingGeometry(0.55, 0.82, 32, 1, 0, Math.PI * 0.75);
+      const arcMat = new THREE.MeshBasicMaterial({
+        color: 0x88e0ff,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      this.slashArc = new THREE.Mesh(arcGeo, arcMat);
+      this.slashArc.position.set(0, 0, -0.45);
+      this.slashArc.visible = false;
+      this.katanaGroup.add(this.slashArc);
+
+      // 2 ghost afterimages
+      this.katanaGhosts = [];
+      for (let i = 0; i < 2; i++) {
+        const gm = new THREE.Mesh(bladeGeo, new THREE.MeshBasicMaterial({
+          color: 0x66ccff,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        }));
+        gm.position.set(0, 0, -0.37);
+        gm.visible = false;
+        this.katanaGroup.add(gm);
+        this.katanaGhosts.push(gm);
+      }
+
+      this.katanaGroup.visible = false;
+      this.katanaGroup.position.set(0, -1, 0);
+    }
+
+    _initMedicField() {
+      this.medicGroup = new THREE.Group();
+      this.medicGroup.renderOrder = 4;
+
+      const baseMesh = new THREE.Mesh(cylGeo(0.24, 0.3, 0.35, 10), lamMat('med.base', { color: 0x2e4033 }));
+      baseMesh.position.y = 0.175;
+
+      const crossMesh1 = new THREE.Mesh(boxGeo(0.18, 0.05, 0.04), new THREE.MeshBasicMaterial({ color: 0x4dff9b }));
+      crossMesh1.position.set(0, 0.22, 0.16);
+      const crossMesh2 = new THREE.Mesh(boxGeo(0.05, 0.18, 0.04), new THREE.MeshBasicMaterial({ color: 0x4dff9b }));
+      crossMesh2.position.set(0, 0.22, 0.16);
+
+      const antenna = new THREE.Mesh(cylGeo(0.02, 0.03, 0.45, 6), lamMat('med.ant', { color: 0x5a7362 }));
+      antenna.position.set(0, 0.45, 0);
+
+      const bulb = new THREE.Mesh(cylGeo(0.06, 0.06, 0.06, 8), new THREE.MeshBasicMaterial({ color: 0x55ffaa }));
+      bulb.position.set(0, 0.68, 0);
+
+      this.medicGroup.add(baseMesh);
+      this.medicGroup.add(crossMesh1);
+      this.medicGroup.add(crossMesh2);
+      this.medicGroup.add(antenna);
+      this.medicGroup.add(bulb);
+
+      // Boundary ring at 3.2m radius
+      const ringGeo = new THREE.RingGeometry(3.1, 3.25, 48);
+      ringGeo.rotateX(-Math.PI / 2);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x3df58b,
+        transparent: true,
+        opacity: 0.85,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      this.medicRing = new THREE.Mesh(ringGeo, ringMat);
+      this.medicRing.position.y = 0.03;
+      this.medicGroup.add(this.medicRing);
+
+      // Inner field disk
+      const diskGeo = new THREE.CircleGeometry(3.08, 36);
+      diskGeo.rotateX(-Math.PI / 2);
+      const diskMat = new THREE.MeshBasicMaterial({
+        color: 0x22cc66,
+        transparent: true,
+        opacity: 0.14,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+      });
+      this.medicDisk = new THREE.Mesh(diskGeo, diskMat);
+      this.medicDisk.position.y = 0.02;
+      this.medicGroup.add(this.medicDisk);
+
+      this.medicGroup.visible = false;
+      this.scene.add(this.medicGroup);
+      this._medicNaniteT = 0;
+    }
+
+    _initGravitySingularity() {
+      this.gravityGroup = new THREE.Group();
+      this.gravityGroup.renderOrder = 4;
+
+      const sphereGeo = new THREE.SphereGeometry(0.38, 16, 12);
+      const coreMat = new THREE.MeshStandardMaterial({
+        color: 0x05020c,
+        roughness: 0.95,
+        emissive: 0x220544
+      });
+      this.gravityCore = new THREE.Mesh(sphereGeo, coreMat);
+      this.gravityCore.position.y = 0.8;
+      this.gravityGroup.add(this.gravityCore);
+
+      const torusGeo = new THREE.TorusGeometry(0.72, 0.045, 8, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0xa844ff,
+        transparent: true,
+        opacity: 0.85,
+        blending: THREE.AdditiveBlending
+      });
+      this.gravRing1 = new THREE.Mesh(torusGeo, ringMat);
+      this.gravRing1.position.y = 0.8;
+      this.gravRing1.rotation.x = 0.65;
+      this.gravityGroup.add(this.gravRing1);
+
+      const gravRing2Mat = new THREE.MeshBasicMaterial({
+        color: 0x6633ff,
+        transparent: true,
+        opacity: 0.65,
+        blending: THREE.AdditiveBlending
+      });
+      this.gravRing2 = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.035, 8, 32), gravRing2Mat);
+      this.gravRing2.position.y = 0.8;
+      this.gravRing2.rotation.x = -0.55;
+      this.gravRing2.rotation.y = 0.45;
+      this.gravityGroup.add(this.gravRing2);
+
+      const vortexGeo = new THREE.RingGeometry(0.4, 3.2, 32);
+      vortexGeo.rotateX(-Math.PI / 2);
+      const vortexMat = new THREE.MeshBasicMaterial({
+        color: 0x7722dd,
+        transparent: true,
+        opacity: 0.35,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+      });
+      this.gravVortex = new THREE.Mesh(vortexGeo, vortexMat);
+      this.gravVortex.position.y = 0.03;
+      this.gravityGroup.add(this.gravVortex);
+
+      const blastGeo = new THREE.RingGeometry(0.1, 0.5, 36);
+      blastGeo.rotateX(-Math.PI / 2);
+      const blastMat = new THREE.MeshBasicMaterial({
+        color: 0xd988ff,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+      });
+      this.gravBlast = new THREE.Mesh(blastGeo, blastMat);
+      this.gravBlast.position.y = 0.06;
+      this.gravityGroup.add(this.gravBlast);
+
+      this.gravityGroup.visible = false;
+      this.scene.add(this.gravityGroup);
+      this._gravPullT = 0;
+      this._gravBlastT = 0;
+    }
+
+    update(dt) {
+      const g = this.game;
+      const b = g.build;
+      const def = b ? b.perk : null;
+      const s = b ? b.perkState : null;
+
+      if (this._toastTimer > 0) {
+        this._toastTimer -= dt;
+        if (this._toastTimer <= 0 && this.actionToastEl) {
+          this.actionToastEl.classList.add('hidden');
+        }
+      }
+
+      // 1. FIRE MAN
+      if (def && def.id === 'fireman' && s) {
+        const isBurning = s.burning > 0;
+        const heat = s.heat || 0;
+        if (isBurning) {
+          this.fireLight.intensity = (0.55 + Math.random() * 0.35) * Math.min(1, s.burning / 1.5);
+          this._fireEmberT -= dt;
+          if (this._fireEmberT <= 0) {
+            this._fireEmberT = 0.05;
+            const w = g.player.weapon;
+            if (w && w.model) {
+              const mw = w.muzzleWorld();
+              g.particles.burst(1, mw.x + rand(-0.05, 0.05), mw.y + rand(-0.05, 0.05), mw.z + rand(-0.05, 0.05), {
+                spread: 0.12, up: 0.9, lifeMin: 0.12, lifeMax: 0.35,
+                sizeMin: 0.02, sizeMax: 0.05, color: [1.0, 0.45 + Math.random() * 0.3, 0.05], grav: -1.6, drag: 1.2
+              });
+            }
+          }
+        } else {
+          this.fireLight.intensity = Math.max(0, this.fireLight.intensity - dt * 3);
+        }
+
+        if (this.vignetteEl) {
+          if (isBurning || heat > 20) {
+            let cls = 'perk-vignette fire-mode';
+            if (heat >= 92) cls += ' critical';
+            else if (heat >= 80) cls += ' warn';
+            if (this.vignetteEl.className !== cls) this.vignetteEl.className = cls;
+          } else if (this.vignetteEl.classList.contains('fire-mode')) {
+            this.vignetteEl.className = 'perk-vignette';
+          }
+        }
+      } else {
+        if (this.fireLight.intensity > 0) this.fireLight.intensity = Math.max(0, this.fireLight.intensity - dt * 4);
+        if (this.vignetteEl && this.vignetteEl.classList.contains('fire-mode')) {
+          this.vignetteEl.className = 'perk-vignette';
+        }
+      }
+
+      // 2. SAMURAI
+      if (def && def.id === 'samurai' && s && s.slash > 0) {
+        this.katanaGroup.visible = true;
+        const p = clamp(1 - (s.slash / 0.34), 0, 1);
+        const w = g.player.weapon;
+        if (w && w.group) {
+          w.group.position.y -= 0.38 * Math.sin(p * Math.PI);
+        }
+
+        if (p < 0.16) {
+          const k = p / 0.16;
+          this.katanaGroup.position.set(lerp(0.35, 0.26, k), lerp(-0.2, 0.14, k), lerp(-0.4, -0.26, k));
+          this.katanaGroup.rotation.set(lerp(0.2, 0.5, k), lerp(-0.8, -0.6, k), lerp(0.5, 0.9, k));
+          this.slashArc.visible = false;
+          for (let i = 0; i < this.katanaGhosts.length; i++) this.katanaGhosts[i].visible = false;
+        } else if (p <= 0.64) {
+          const k = (p - 0.16) / 0.48;
+          this.katanaGroup.position.set(lerp(0.26, -0.32, k), lerp(0.14, -0.22, k), lerp(-0.26, -0.32, k));
+          this.katanaGroup.rotation.set(lerp(0.5, -0.75, k), lerp(-0.6, 0.75, k), lerp(0.9, -1.55, k));
+          this.slashArc.visible = true;
+          this.slashArc.material.opacity = Math.sin(k * Math.PI) * 0.85;
+          this.slashArc.rotation.z = lerp(0.4, -1.2, k);
+          for (let i = 0; i < this.katanaGhosts.length; i++) {
+            const gm = this.katanaGhosts[i];
+            gm.visible = true;
+            const gk = Math.max(0, k - (i + 1) * 0.1);
+            gm.material.opacity = Math.sin(gk * Math.PI) * 0.35;
+          }
+        } else {
+          const k = (p - 0.64) / 0.36;
+          this.katanaGroup.position.set(lerp(-0.32, -0.15, k), lerp(-0.22, -0.65, k), lerp(-0.32, -0.25, k));
+          this.katanaGroup.rotation.set(lerp(-0.75, 0, k), lerp(0.75, 0.2, k), lerp(-1.55, -0.4, k));
+          this.slashArc.visible = false;
+          for (let i = 0; i < this.katanaGhosts.length; i++) this.katanaGhosts[i].visible = false;
+        }
+      } else {
+        if (this.katanaGroup.visible) {
+          this.katanaGroup.visible = false;
+          this.katanaGroup.position.set(0, -1, 0);
+          this.slashArc.visible = false;
+          for (let i = 0; i < this.katanaGhosts.length; i++) this.katanaGhosts[i].visible = false;
+        }
+      }
+
+      // 3. EXECUTIONER
+      if (def && def.id === 'executioner' && s) {
+        const state = s.maskState || (s.maskActive > 0 ? 'EQUIPPED' : 'OFF');
+        const dur = clamp(s.mask !== undefined ? s.mask : 100, 0, 100);
+
+        if (state === 'EQUIPPED') {
+          if (this.visorEl) this.visorEl.classList.remove('hidden');
+          if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+          const bonus = (s.damageBonus || 0) * 4;
+          if (this.visorDurText) this.visorDurText.textContent = 'MASK: ' + Math.round(dur) + '%' + (bonus > 0 ? ' (+' + bonus + '% DMG)' : '');
+          if (this.visorDurFill) {
+            this.visorDurFill.style.width = dur + '%';
+            this.visorDurFill.style.background = dur > 70 ? 'linear-gradient(90deg, #55ffbb, #33bbff)' :
+              (dur > 30 ? 'linear-gradient(90deg, #ffb347, #ff8833)' : 'linear-gradient(90deg, #ff2233, #ff6644)');
+          }
+          if (this.visorCracks) {
+            if (dur < 35) this.visorCracks.className = 'visor-cracks crack-3';
+            else if (dur < 65) this.visorCracks.className = 'visor-cracks crack-2';
+            else if (dur < 90) this.visorCracks.className = 'visor-cracks crack-1';
+            else this.visorCracks.className = 'visor-cracks';
+          }
+          if (this.visorRepairBox) this.visorRepairBox.classList.add('hidden');
+        } else if (state === 'BROKEN') {
+          if (this.visorEl) this.visorEl.classList.add('hidden');
+          if (this.maskBreakOverlay) this.maskBreakOverlay.classList.remove('hidden');
+        } else if (state === 'REPAIRING') {
+          if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+          if (this.visorEl) this.visorEl.classList.add('hidden');
+        } else if (state === 'READY') {
+          if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+          if (this.visorEl) this.visorEl.classList.add('hidden');
+        } else { // 'OFF'
+          if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+          if (this.visorEl) this.visorEl.classList.add('hidden');
+        }
+      } else {
+        if (this.visorEl && !this.visorEl.classList.contains('hidden')) {
+          this.visorEl.classList.add('hidden');
+        }
+        if (this.maskBreakOverlay && !this.maskBreakOverlay.classList.contains('hidden')) {
+          this.maskBreakOverlay.classList.add('hidden');
+        }
+      }
+
+      // 4. PHANTOM
+      const phantomActive = def && def.id === 'phantom' && s && s.active > 0;
+      if (phantomActive) {
+        if (this.vignetteEl && !this.vignetteEl.classList.contains('phantom-spectral')) {
+          this.vignetteEl.className = 'perk-vignette phantom-spectral';
+        }
+        const w = g.player.weapon;
+        if (w && w.model) {
+          w.model.traverse((o) => {
+            if (o.isMesh && o.material !== this.spectralMat && o.material !== w.flash.material) {
+              if (!this._origWeaponMats.has(o)) this._origWeaponMats.set(o, o.material);
+              o.material = this.spectralMat;
+            }
+          });
+        }
+      } else {
+        if (this.vignetteEl && this.vignetteEl.classList.contains('phantom-spectral')) {
+          this.vignetteEl.className = 'perk-vignette';
+          const pl = g.player.position;
+          g.particles.burst(18, pl.x, pl.y + 1, pl.z, {
+            spread: 1.8, up: 1.2, lifeMin: 0.2, lifeMax: 0.5,
+            sizeMin: 0.04, sizeMax: 0.1, color: [0.5, 0.4, 0.95], grav: -0.5, drag: 2
+          });
+        }
+        if (this._origWeaponMats.size > 0) {
+          this._origWeaponMats.forEach((mat, mesh) => { mesh.material = mat; });
+          this._origWeaponMats.clear();
+        }
+      }
+
+      // 5. MEDIC
+      if (def && def.id === 'medic' && s && s.fieldT > 0) {
+        this.medicGroup.visible = true;
+        this.medicGroup.position.copy(s.fieldPos);
+        this.medicDisk.rotation.z += dt * 0.4;
+        const pulse = 0.8 + Math.sin(g.time * 4) * 0.15;
+        this.medicRing.material.opacity = pulse;
+
+        this._medicNaniteT -= dt;
+        if (this._medicNaniteT <= 0) {
+          this._medicNaniteT = 0.12;
+          const r = rand(0.4, 2.9);
+          const a = Math.random() * Math.PI * 2;
+          g.particles.burst(2, s.fieldPos.x + Math.cos(a) * r, 0.1, s.fieldPos.z + Math.sin(a) * r, {
+            spread: 0.2, up: 1.8, lifeMin: 0.35, lifeMax: 0.75,
+            sizeMin: 0.03, sizeMax: 0.08, color: [0.35, 1.0, 0.6], grav: -1.2, drag: 1.5
+          });
+        }
+
+        const inside = g.player.position.distanceTo(s.fieldPos) < 3.2;
+        if (this.vignetteEl) {
+          if (inside && !this.vignetteEl.classList.contains('medic-heal') && !this.vignetteEl.classList.contains('fire-mode') && !phantomActive) {
+            this.vignetteEl.className = 'perk-vignette medic-heal';
+          } else if (!inside && this.vignetteEl.classList.contains('medic-heal')) {
+            this.vignetteEl.className = 'perk-vignette';
+          }
+        }
+      } else {
+        if (this.medicGroup.visible) {
+          this.medicGroup.visible = false;
+          const mp = this.medicGroup.position;
+          g.particles.burst(14, mp.x, 0.4, mp.z, {
+            spread: 1.4, up: 0.8, lifeMin: 0.2, lifeMax: 0.45,
+            sizeMin: 0.04, sizeMax: 0.09, color: [0.4, 0.9, 0.6], grav: 1.5, drag: 2
+          });
+        }
+        if (this.vignetteEl && this.vignetteEl.classList.contains('medic-heal')) {
+          this.vignetteEl.className = 'perk-vignette';
+        }
+      }
+
+      // 6. GRAVITY
+      if (def && def.id === 'gravity' && s && s.pulseT > 0) {
+        this.gravityGroup.visible = true;
+        this.gravityGroup.position.copy(s.pulsePos);
+        const spinSpeed = 8 + (1 - s.pulseT / 1.6) * 18;
+        this.gravRing1.rotation.z += dt * spinSpeed;
+        this.gravRing2.rotation.z -= dt * spinSpeed * 0.8;
+        this.gravVortex.rotation.z += dt * spinSpeed * 0.5;
+
+        this._gravPullT -= dt;
+        if (this._gravPullT <= 0) {
+          this._gravPullT = 0.06;
+          const a = Math.random() * Math.PI * 2;
+          const r = rand(2.5, 4.5);
+          const px = s.pulsePos.x + Math.cos(a) * r;
+          const pz = s.pulsePos.z + Math.sin(a) * r;
+          const dirX = (s.pulsePos.x - px) * 2;
+          const dirZ = (s.pulsePos.z - pz) * 2;
+          g.particles.spawn(px, 0.4 + rand(0, 1.2), pz, dirX, 0.2, dirZ, 0.4, 0.06, 0.65, 0.25, 1.0, -1, 1.4);
+        }
+      } else if (this._gravBlastT > 0) {
+        this._gravBlastT -= dt;
+        const p = clamp(1 - (this._gravBlastT / 0.25), 0, 1);
+        const curR = lerp(0.2, 9.0, p);
+        this.gravBlast.scale.set(curR, curR, 1);
+        this.gravBlast.material.opacity = (1 - p) * 0.95;
+        if (this._gravBlastT <= 0) {
+          this.gravityGroup.visible = false;
+          this.gravBlast.material.opacity = 0;
+        }
+      } else {
+        if (this.gravityGroup.visible && s && s.pulseT <= 0) {
+          this.gravityGroup.visible = false;
+        }
+      }
+    }
+
+    onActivate(perkId, s) {
+      if (perkId === 'fireman') {
+        this.showActionToast('FIRE MODE', 'INCENDIARY ROUNDS ENGAGED', '#ff7722');
+      } else if (perkId === 'samurai') {
+        this.startKatanaSlash();
+      } else if (perkId === 'executioner') {
+        this.showActionToast('EXECUTIONER OPTICS', 'THERMAL TRACKING ONLINE', '#ff4455');
+        if (this.visorEl) this.visorEl.classList.remove('hidden');
+      } else if (perkId === 'phantom') {
+        this.showActionToast('PHANTOM SHIFT', 'ETHEREAL UNTOUCHABLE', '#8855ff');
+        if (this.vignetteEl) this.vignetteEl.className = 'perk-vignette phantom-spectral';
+      } else if (perkId === 'medic') {
+        this.showActionToast('MEDIC BEACON', 'HEALING ZONE DEPLOYED (3.2m)', '#4dff9b');
+        this.medicGroup.visible = true;
+        if (s && s.fieldPos) this.medicGroup.position.copy(s.fieldPos);
+      } else if (perkId === 'gravity') {
+        this.showActionToast('SINGULARITY PULSE', 'GRAVITY VORTEX ENGAGED', '#aa33ff');
+        this.gravityGroup.visible = true;
+        if (s && s.pulsePos) this.gravityGroup.position.copy(s.pulsePos);
+      } else if (perkId === 'engineer') {
+        this.showActionToast('SENTRY DEPLOYED', 'AUTOMATED TURRET ACTIVE', '#46a9ff');
+      }
+    }
+
+    startKatanaSlash() {
+      this.katanaGroup.visible = true;
+    }
+
+    onSlashHit(enemy, dir) {
+      if (enemy && enemy.alive) {
+        enemy.knock.addScaledVector(dir, 4.5);
+      }
+    }
+
+    onSoulHeal(remainingDogtags) {
+      this.showActionToast('+15 HP', 'SOUL HEAL (' + remainingDogtags + ' DOGTAGS)', '#55ff99');
+      if (this.vignetteEl) {
+        this.vignetteEl.classList.add('heal-pulse');
+        setTimeout(() => { if (this.vignetteEl) this.vignetteEl.classList.remove('heal-pulse'); }, 400);
+      }
+      const pl = this.game.player.position;
+      this.game.particles.burst(18, pl.x, 0.2, pl.z, {
+        spread: 1.8, up: 1.4, lifeMin: 0.2, lifeMax: 0.55,
+        sizeMin: 0.04, sizeMax: 0.09, color: [0.35, 1.0, 0.55], grav: -0.8, drag: 1.6
+      });
+    }
+
+    onMaskToggled(equipped) {
+      if (equipped) {
+        if (this.visorEl) this.visorEl.classList.remove('hidden');
+        if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+        this.showActionToast('EXECUTIONER OPTICS', 'THERMAL TRACKING ONLINE', '#ff4455');
+      } else {
+        if (this.visorEl) this.visorEl.classList.add('hidden');
+        if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+        this.showActionToast('MASK REMOVED', 'OPTICS OFFLINE', '#8899aa');
+      }
+    }
+
+    onMaskBroken() {
+      if (this.visorEl) this.visorEl.classList.add('hidden');
+      if (this.maskBreakOverlay) this.maskBreakOverlay.classList.remove('hidden');
+    }
+
+    onMaskRepairStarted() {
+      if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+      this.showActionToast('MASK REPAIRING', 'REGENERATING OPTICS (50% REQ)', '#ffaa33');
+    }
+
+    onMaskReady() {
+      if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+      this.showActionToast('MASK READY', 'PRESS F TO EQUIP', '#4dff9b');
+    }
+
+    onPlayerDamaged(amount) {
+      const s = this.game.build ? this.game.build.perkState : null;
+      if (s && (s.maskState === 'EQUIPPED' || s.maskActive > 0) && this.visorEl) {
+        this.visorEl.classList.add('hit-glitch');
+        setTimeout(() => { if (this.visorEl) this.visorEl.classList.remove('hit-glitch'); }, 180);
+      }
+    }
+
+    onOverheat() {
+      if (this.vignetteEl) {
+        this.vignetteEl.className = 'perk-vignette overheat-flash';
+      }
+    }
+
+    onGravityBurst(pos) {
+      this._gravBlastT = 0.25;
+      this.gravBlast.material.opacity = 0.95;
+      this.gravBlast.scale.set(0.1, 0.1, 1);
+    }
+
+    onPerkChanged(newDef) {
+      this.reset();
+    }
+
+    showActionToast(title, sub, color) {
+      if (!this.actionToastEl) return;
+      this.actionToastEl.innerHTML = '<span style="color:' + (color || '#46a9ff') + '">' + title + '</span>' + (sub ? ' <i>// ' + sub + '</i>' : '');
+      this.actionToastEl.classList.remove('hidden');
+      this._toastTimer = 1.1;
+    }
+
+    reset() {
+      if (this.katanaGroup) {
+        this.katanaGroup.visible = false;
+        this.katanaGroup.position.set(0, -1, 0);
+      }
+      if (this.fireLight) this.fireLight.intensity = 0;
+      if (this.medicGroup) this.medicGroup.visible = false;
+      if (this.gravityGroup) this.gravityGroup.visible = false;
+      if (this.visorEl) this.visorEl.classList.add('hidden');
+      if (this.maskBreakOverlay) this.maskBreakOverlay.classList.add('hidden');
+      if (this.vignetteEl) this.vignetteEl.className = 'perk-vignette';
+      if (this.actionToastEl) this.actionToastEl.classList.add('hidden');
+      if (this._origWeaponMats && this._origWeaponMats.size > 0) {
+        this._origWeaponMats.forEach((mat, mesh) => { mesh.material = mat; });
+        this._origWeaponMats.clear();
+      }
+      this._gravBlastT = 0;
+    }
+
+    dispose() {
+      this.reset();
+      if (this.katanaGroup) this.camera.remove(this.katanaGroup);
+      if (this.fireLight) this.camera.remove(this.fireLight);
+      if (this.medicGroup) this.scene.remove(this.medicGroup);
+      if (this.gravityGroup) this.scene.remove(this.gravityGroup);
+    }
+  }
+
   /* ========================================================== UI MANAGER */
 
   class UIManager {
@@ -6320,6 +7516,7 @@
         hitmarker: $('hitmarker'),
         vignette: $('damage-vignette'),
         lowHp: $('low-hp-pulse'),
+        damageDirectionLayer: $('damage-direction-layer'),
         dirDmg: $('directional-damage'),
         banner: $('wave-banner'),
         intermission: $('intermission'),
@@ -6368,6 +7565,7 @@
       this._rewardPick = null;
       this._bossRef = null;
       this._promptRef = null;
+      this.directionalDamage = new DirectionalDamageSystem(this.game, this.el.damageDirectionLayer || this.el.dirDmg);
     }
 
     showScreen(name) {
@@ -6522,7 +7720,13 @@
       if (!b.perk) { el.classList.add('hidden'); el.innerHTML = ''; return; }
       el.classList.remove('hidden');
       const s = b.perkStatus();
-      el.className = 'perk-hud' + (s.warn ? ' warn' : '');
+      const isCritical = !!(s.critical || (b.perk.id === 'fireman' && b.perkState && b.perkState.heat >= 92));
+      const isPhantom = !!(b.perk.id === 'phantom' && b.perkState && b.perkState.active > 0);
+      let cls = 'perk-hud';
+      if (isCritical) cls += ' critical';
+      else if (s.warn) cls += ' warn';
+      if (isPhantom) cls += ' phantom-active';
+      el.className = cls;
       el.innerHTML = '<div class="perk-row"><i>' + b.perk.glyph + '</i><b>' + b.perk.name + '</b>' +
         '<span>' + (s.label ? s.label + '  ' : '') + s.text + '</span></div>' +
         '<div class="perk-bar"><div style="width:' + Math.round(clamp(s.bar, 0, 1) * 100) + '%"></div></div>';
@@ -6694,7 +7898,10 @@
       // damage vignette fade
       if (this._vignetteT > 0) {
         this._vignetteT -= dt;
-        if (this._vignetteT <= 0) this.el.vignette.style.opacity = '0';
+        if (this._vignetteT <= 0 && this.el.vignette) this.el.vignette.style.opacity = '0';
+      }
+      if (this.directionalDamage) {
+        this.directionalDamage.update(dt);
       }
 
       if (this._weaponFlashT > 0) {
@@ -6834,25 +8041,20 @@
       h.classList.add('show');
     }
 
-    showDamage() {
+    showDamage(amount = 20) {
       const v = this.el.vignette;
-      v.classList.remove('hit');
-      void v.offsetWidth;
-      v.classList.add('hit');
-      this._vignetteT = 0.45;
+      if (v) {
+        v.classList.remove('hit');
+        void v.offsetWidth;
+        v.classList.add('hit');
+      }
+      this._vignetteT = 0.50;
     }
 
-    showDirectionalDamage(sourcePos, camera) {
-      const dx = sourcePos.x - camera.position.x;
-      const dz = sourcePos.z - camera.position.z;
-      // angle relative to where the player looks (camera forward = -Z)
-      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      const ang = Math.atan2(dx, dz) - Math.atan2(fwd.x, fwd.z);
-      const arc = document.createElement('div');
-      arc.className = 'dmg-arc';
-      arc.style.transform = 'rotate(' + (ang * 180 / Math.PI + 180).toFixed(1) + 'deg)';
-      this.el.dirDmg.appendChild(arc);
-      setTimeout(() => { if (arc.parentNode) arc.parentNode.removeChild(arc); }, 1150);
+    showDirectionalDamage(sourcePos, camera, amount = 20, options = {}) {
+      if (this.directionalDamage) {
+        this.directionalDamage.showDamage(amount, sourcePos, options);
+      }
     }
 
 showDamageNumber(worldPos, amount, head, crit, color) {
@@ -6954,6 +8156,7 @@ showBanner(text, cleared, duration) {
 
       this.waveManager = new WaveManager(this);
       this.ui = new UIManager(this);
+      this.perkVisuals = new PerkVisualSystem(this);
 
       this._bindUI();
       this._bindResize();
@@ -7105,6 +8308,12 @@ showBanner(text, cleared, duration) {
       this.particles.clear();
       this.tracers.clear();
       this.projectiles.clear();
+      for (let i = this.afterimages.length - 1; i >= 0; i--) {
+        const a = this.afterimages[i];
+        this.scene.remove(a.mesh);
+        a.mesh.material.dispose();
+      }
+      this.afterimages.length = 0;
       this.player.respawn();
       // respawn re-registers the player hitboxes
       this.collision.addDynamic(this.player.hitBody);
@@ -7129,6 +8338,9 @@ showBanner(text, cleared, duration) {
       this.ui.el.kills.textContent = '0';
       this.ui.el.dmgNums.innerHTML = '';
       this.ui.dmgNumCount = 0;
+      if (this.ui && this.ui.directionalDamage) this.ui.directionalDamage.reset();
+      if (this.perkVisuals) this.perkVisuals.reset();
+      this._healToken = 0;
     }
 
     pause() {
@@ -7155,6 +8367,7 @@ showBanner(text, cleared, duration) {
 
     onPlayerDeath() {
       this.pendingGameOver = 2.6;
+      if (this.perkVisuals) this.perkVisuals.reset();
     }
 
     /* ================= build system (trails + perk) ================= */
@@ -7166,20 +8379,26 @@ showBanner(text, cleared, duration) {
 
     activatePerk() {
       const b = this.build, def = b.perk, s = b.perkState;
-      if (!def || !s || s.cd > 0 || !this.player.alive) return false;
+      if (!def || !s || !this.player.alive) return false;
+
+      if (def.id === 'executioner') {
+        return this._toggleExecutionerMask();
+      }
+
+      if (def.id === 'samurai') {
+        const rec = s.slashRecovery !== undefined ? s.slashRecovery : 1;
+        if (rec < 1) return false;
+        this._samuraiSlash();
+        this.ui.updatePerkHud();
+        return true;
+      }
+
+      if (s.cd > 0) return false;
       s.cd = def.cd;
       switch (def.id) {
         case 'fireman':
           s.burning = Math.max(s.burning, 2.5);
           this.audio.tone(this.audio.t, 0.16, 320, 620, 0.14, 'sawtooth');
-          break;
-        case 'samurai':
-          this._samuraiSlash();
-          break;
-        case 'executioner':
-          if (s.maskBroken) { this.audio.dryFire(); return false; }
-          s.maskActive = 6;
-          this.audio.tone(this.audio.t, 0.2, 180, 420, 0.2, 'triangle');
           break;
         case 'phantom':
           s.active = b.hasSynergy('phantom_momentum') ? 3.8 : 3.0;
@@ -7193,7 +8412,7 @@ showBanner(text, cleared, duration) {
         case 'gravity':
           s.pulsePos.copy(this.player.position);
           s.pulseT = 1.6;
-          this._pulseBoom = false;
+          this._pulseBoom = true;
           this.audio.tone(this.audio.t, 0.35, 200, 70, 0.35, 'sine');
           break;
         case 'engineer':
@@ -7203,6 +8422,54 @@ showBanner(text, cleared, duration) {
           break;
       }
       this.ui.showBuffToast(def.name, def.desc);
+      if (this.perkVisuals) this.perkVisuals.onActivate(def.id, s);
+      return true;
+    }
+
+    _toggleExecutionerMask() {
+      const b = this.build, s = b.perkState;
+      if (!s) return false;
+      const state = s.maskState || 'OFF';
+
+      if (state === 'BROKEN' || state === 'REPAIRING') {
+        this.audio.dryFire();
+        if (this.perkVisuals) {
+          this.perkVisuals.showActionToast(
+            state === 'BROKEN' ? 'TAKE OFF MASK' : 'MASK REPAIRING',
+            state === 'BROKEN' ? 'MASK SHATTERED' : Math.round(s.mask) + '% (NEEDS 50%)',
+            '#ff3344'
+          );
+        }
+        return false;
+      }
+
+      if (state === 'EQUIPPED') {
+        // Manual unequip:
+        s.maskState = 'OFF';
+        s.maskActive = 0;
+        s.damageBonus = 0;
+        this.clearEnemyMarkers();
+        this.audio.tone(this.audio.t, 0.18, 420, 180, 0.18, 'triangle');
+        if (this.perkVisuals) this.perkVisuals.onMaskToggled(false);
+        this.ui.updatePerkHud();
+        b.apply();
+        return true;
+      }
+
+      // state is 'OFF' or 'READY':
+      if (s.mask < 50 && (s.maskBroken || state === 'REPAIRING')) {
+        this.audio.dryFire();
+        return false;
+      }
+
+      // Manual equip:
+      s.maskState = 'EQUIPPED';
+      s.maskActive = 1;
+      s.damageBonus = 0; // Starts fresh, do not restore previous bonus
+      this.audio.tone(this.audio.t, 0.2, 180, 420, 0.2, 'triangle');
+      if (this.perkVisuals) this.perkVisuals.onMaskToggled(true);
+      this.ui.updatePerkHud();
+      b.apply();
       return true;
     }
 
@@ -7219,6 +8486,7 @@ showBanner(text, cleared, duration) {
         s.dogtags--;
         this.healPlayer(15, dt);
         this.audio.tone(this.audio.t, 0.2, 500, 760, 0.2, 'sine');
+        if (this.perkVisuals) this.perkVisuals.onSoulHeal(s.dogtags);
       }
       return true;
     }
@@ -7249,6 +8517,12 @@ showBanner(text, cleared, duration) {
       const w = this.player.weapon;
       const st = w ? w.stats : { damage: 40 };
       s.slash = 0.34;
+      if ((s.dogtags || 0) >= 10) {
+        s.slashRecovery = 1.0;
+      } else {
+        s.slashRecovery = 0.0;
+      }
+      if (this.perkVisuals) this.perkVisuals.startKatanaSlash();
       this.audio.tone(this.audio.t, 0.14, 900, 260, 0.14, 'triangle');
       const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
       const origin = this.player.position.clone();
@@ -7264,12 +8538,13 @@ showBanner(text, cleared, duration) {
         if (to.dot(dir) < 0.55) continue;                  // 3m cone in front
         hitAny = true;
         e.takeDamage(st.damage * 1.8, to, false, this);
-        this.particles.burst(8, e.position.x, e.chestY, e.position.z, {
-          spread: 1.6, up: 1.4, lifeMin: 0.15, lifeMax: 0.35,
-          sizeMin: 0.02, sizeMax: 0.05, color: [1.0, 0.9, 0.7], grav: 4, drag: 2
+        if (this.perkVisuals) this.perkVisuals.onSlashHit(e, to);
+        this.particles.burst(14, e.position.x, e.chestY, e.position.z, {
+          spread: 1.8, up: 1.6, lifeMin: 0.15, lifeMax: 0.38,
+          sizeMin: 0.03, sizeMax: 0.07, color: [1.0, 0.95, 0.8], grav: 4, drag: 2
         });
       }
-      if (hitAny) this.addShake(0.12);
+      if (hitAny) this.addShake(0.18);
     }
 
     /** fire man: burning refreshes duration but never stacks */
@@ -7340,10 +8615,12 @@ showBanner(text, cleared, duration) {
           this.ui.el.hud.appendChild(el);
           pool[n] = el;
         }
-        el.style.display = 'block';
+        el.style.display = 'flex';
         el.style.left = ((p.x * 0.5 + 0.5) * window.innerWidth) + 'px';
         el.style.top = ((-p.y * 0.5 + 0.5) * window.innerHeight) + 'px';
-        el.textContent = Math.round(dist) + 'm';
+        const typeStr = e.type.boss ? 'BOSS' : (e.type.key ? e.type.key.toUpperCase() : 'HOSTILE');
+        el.innerHTML = '<div class="em-reticle"><span class="em-diamond">◆</span></div>' +
+          '<div class="em-meta"><span class="em-type">' + typeStr + '</span><span class="em-dist">' + Math.round(dist) + 'm</span></div>';
         n++;
       }
       for (let i = n; i < pool.length; i++) pool[i].style.display = 'none';
@@ -7378,6 +8655,7 @@ showBanner(text, cleared, duration) {
       }
       if (remaining <= 0.001 && this._pulseBoom !== false) {
         this._pulseBoom = false;
+        if (this.perkVisuals) this.perkVisuals.onGravityBurst(pos);
         for (let i = 0; i < this.enemies.length; i++) {
           const e = this.enemies[i];
           if (!e.alive || e.spawnT < 1) continue;
@@ -7410,10 +8688,55 @@ showBanner(text, cleared, duration) {
       const led = new THREE.Mesh(boxGeo(0.06, 0.06, 0.06), new THREE.MeshBasicMaterial({ color: 0x4dff9b }));
       led.position.set(0, 0.5, 0.12);
       g.add(base); g.add(body); g.add(barrel); g.add(led);
+
+      // Tripod legs
+      const legMat = lamMat('tr.legs', { color: 0x333b47 });
+      for (let a = 0; a < 3; a++) {
+        const leg = new THREE.Mesh(boxGeo(0.05, 0.05, 0.38), legMat);
+        leg.position.set(Math.cos(a * 2.09) * 0.22, 0.06, Math.sin(a * 2.09) * 0.22);
+        leg.rotation.y = a * 2.09;
+        leg.rotation.x = 0.45;
+        g.add(leg);
+      }
+
+      // Turret muzzle flash cone
+      const flashGeo = new THREE.ConeGeometry(0.08, 0.25, 6, 1, true);
+      flashGeo.rotateX(-Math.PI / 2);
+      flashGeo.translate(0, 0, -0.15);
+      const flashMat = new THREE.MeshBasicMaterial({
+        color: 0xffdd88,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+      const tFlash = new THREE.Mesh(flashGeo, flashMat);
+      tFlash.position.set(0, 0, -0.28);
+      tFlash.visible = false;
+      barrel.add(tFlash);
+
       g.position.set(pos.x, pos.y, pos.z);
+      g.scale.set(0.1, 0.1, 0.1);
       g.updateMatrixWorld(true);
       this.scene.add(g);
-      return { mesh: g, barrel: barrel, led: led, life: 15, cd: 0 };
+      this.audio.tone(this.audio.t, 0.15, 200, 480, 0.2, 'sawtooth');
+      this.particles.burst(8, pos.x, pos.y + 0.1, pos.z, {
+        spread: 0.6, up: 0.8, lifeMin: 0.1, lifeMax: 0.25,
+        sizeMin: 0.02, sizeMax: 0.05, color: [0.9, 0.8, 0.4], grav: 3, drag: 2
+      });
+
+      return {
+        mesh: g,
+        barrel: barrel,
+        led: led,
+        flash: tFlash,
+        flashT: 0,
+        deployT: 0.35,
+        baseYaw: this.player.yaw,
+        life: 15,
+        cd: 0
+      };
     }
 
     updateTurret(t, dt) {
@@ -7421,6 +8744,26 @@ showBanner(text, cleared, duration) {
       t.life -= dt;
       if (t.life <= 0) { this.removeTurret(t); return false; }
       t.cd -= dt;
+
+      // Deploy animation
+      if (t.deployT > 0) {
+        t.deployT -= dt;
+        const p = clamp(1 - t.deployT / 0.35, 0.1, 1);
+        t.mesh.scale.set(1, p, 1);
+      } else if (t.mesh.scale.y < 0.99) {
+        t.mesh.scale.set(1, 1, 1);
+      }
+
+      // Flash fade
+      if (t.flashT > 0) {
+        t.flashT -= dt;
+        t.flash.material.opacity = Math.max(0, t.flashT / 0.055);
+        if (t.flashT <= 0) t.flash.visible = false;
+      }
+
+      // Barrel recoil spring return
+      t.barrel.position.z = lerp(t.barrel.position.z, -0.32, damp(18, dt));
+
       const st = this.player.weapon ? this.player.weapon.stats : { damage: 14 };
       let best = null, bestD = 18;
       for (let i = 0; i < this.enemies.length; i++) {
@@ -7429,16 +8772,34 @@ showBanner(text, cleared, duration) {
         const d = e.position.distanceTo(t.mesh.position);
         if (d < bestD) { bestD = d; best = e; }
       }
-      t.led.material.color.setHex(best ? 0xff5b5b : 0x4dff9b);
-      if (!best) return true;
+
+      if (!best) {
+        // Idle scan sweep
+        t.led.material.color.setHex(0x4dff9b);
+        t.mesh.rotation.y = lerp(t.mesh.rotation.y, (t.baseYaw || 0) + Math.sin(this.time * 2.2) * 0.75, damp(4, dt));
+        return true;
+      }
+
+      // Target acquired: alert red LED & smooth tracking
+      t.led.material.color.setHex(0xff3333);
       const dx = best.position.x - t.mesh.position.x, dz = best.position.z - t.mesh.position.z;
-      t.mesh.rotation.y = lerp(t.mesh.rotation.y, Math.atan2(dx, dz), damp(9, dt));
+      t.mesh.rotation.y = lerp(t.mesh.rotation.y, Math.atan2(dx, dz), damp(11, dt));
+
       if (t.cd <= 0) {
         t.cd = 0.45;
+        t.barrel.position.z = -0.22; // recoil kickback
+        t.flash.visible = true;
+        t.flash.material.opacity = 1;
+        t.flashT = 0.055;
+
         t.mesh.updateMatrixWorld(true);
-        const muzzle = new THREE.Vector3(0, 0.36, -0.5).applyMatrix4(t.mesh.matrixWorld);
+        const muzzle = new THREE.Vector3(0, 0.36, -0.55).applyMatrix4(t.mesh.matrixWorld);
         const dir = new THREE.Vector3(dx, best.chestY - muzzle.y, dz).normalize();
         this.tracers.add(muzzle, new THREE.Vector3(best.position.x, best.chestY, best.position.z), 1, 0.8, 0.3, 0.06);
+        this.particles.burst(3, muzzle.x, muzzle.y, muzzle.z, {
+          spread: 0.3, up: 0.5, lifeMin: 0.08, lifeMax: 0.2,
+          sizeMin: 0.02, sizeMax: 0.05, color: [0.8, 0.7, 0.6], grav: 1, drag: 2
+        });
         best.takeDamage(st.damage * 0.8, dir, false, this);
         this.audio.enemyShoot();
       }
@@ -7447,8 +8808,14 @@ showBanner(text, cleared, duration) {
 
     removeTurret(t) {
       if (!t.mesh) return;
+      this.particles.burst(16, t.mesh.position.x, t.mesh.position.y + 0.3, t.mesh.position.z, {
+        spread: 1.4, up: 1.4, lifeMin: 0.2, lifeMax: 0.5,
+        sizeMin: 0.03, sizeMax: 0.08, color: [0.35, 0.8, 1.0], grav: 3, drag: 2
+      });
+      this.audio.tone(this.audio.t, 0.25, 420, 100, 0.25, 'sawtooth');
       this.scene.remove(t.mesh);
       t.led.material.dispose();
+      if (t.flash && t.flash.material) t.flash.material.dispose();
       t.mesh = null;
     }
 
@@ -7611,28 +8978,26 @@ showBanner(text, cleared, duration) {
         // fill a free slot, otherwise replace the oldest one
         const free = this.build.trails.indexOf(null);
         this.build.equipTrail(def.id, free >= 0 ? free : 0);
-        return;
-      }
-      if (kind === 'perk') {
+      } else if (kind === 'perk') {
         this.build.equipPerk(def.id);
-        return;
-      }
-      this.player.addBuff(def.id, def);
-      if (def.heal) this.player.heal(this.player.maxHealth * def.heal);
-      if (def.refill !== undefined) {
-        for (let i = 0; i < this.player.weapons.length; i++) {
-          const w = this.player.weapons[i];
-          if (w) w.inst.refill(def.refill);
+      } else {
+        this.player.addBuff(def.id, def);
+        if (def.heal) this.player.heal(this.player.maxHealth * def.heal);
+        if (def.refill !== undefined) {
+          for (let i = 0; i < this.player.weapons.length; i++) {
+            const w = this.player.weapons[i];
+            if (w) w.inst.refill(def.refill);
+          }
         }
-      }
-      if (def.slot) {
-        // fill the first empty slot with a stage-appropriate weapon
-        const slot = this.player.freeSlot();
-        if (slot >= 0) {
-          const inst = this.loot.create(Math.max(1, this.waveManager.wave),
-            this.player.stats.lootLuck, null, 1);
-          this.player._equip(slot, inst);
-          if (slot === this.player.current) this.player.weapon.group.visible = true;
+        if (def.slot) {
+          // fill the first empty slot with a stage-appropriate weapon
+          const slot = this.player.freeSlot();
+          if (slot >= 0) {
+            const inst = this.loot.create(Math.max(1, this.waveManager.wave),
+              this.player.stats.lootLuck, null, 1);
+            this.player._equip(slot, inst);
+            if (slot === this.player.current) this.player.weapon.group.visible = true;
+          }
         }
       }
       this.audio.waveCleared();
@@ -7792,6 +9157,7 @@ showBanner(text, cleared, duration) {
       // ---- build system (trails + perk) ----
       this.build.update(gdt);
       this.updateAfterimages(dt);
+      if (this.perkVisuals) this.perkVisuals.update(gdt);
 
       // ---- waves ----
       this.waveManager.update(gdt);
@@ -7852,7 +9218,11 @@ showBanner(text, cleared, duration) {
     ATTACHMENTS: ATTACHMENTS,
     ARMOR_KINDS: ARMOR_KINDS,
     resolveStats: resolveStats,
-    combineMods: combineMods
+    combineMods: combineMods,
+    DirectionalDamageSystem: DirectionalDamageSystem,
+    PerkVisualSystem: PerkVisualSystem,
+    getSamuraiRecoveryRate: getSamuraiRecoveryRate,
+    SAMURAI_RECOVERY_DURATIONS: SAMURAI_RECOVERY_DURATIONS
   };
 
   window.addEventListener('DOMContentLoaded', () => {
